@@ -1,0 +1,11 @@
+t=2026-02-16T12:31:17+0530 lvl=info msg="no configuration paths supplied"
+t=2026-02-16T12:31:17+0530 lvl=info msg="using configuration at default config path" path=C:\\Users\\HP-OMEN\\AppData\\Local/ngrok/ngrok.yml
+t=2026-02-16T12:31:17+0530 lvl=info msg="open config file" path=C:\\Users\\HP-OMEN\\AppData\\Local\\ngrok\\ngrok.yml err=nil
+t=2026-02-16T12:31:17+0530 lvl=info msg="FIPS 140 mode" enabled=false
+t=2026-02-16T12:31:17+0530 lvl=info msg="starting web service" obj=web addr=127.0.0.1:4040 allow_hosts=[]
+t=2026-02-16T12:31:17+0530 lvl=info msg="client session established" obj=tunnels.session
+t=2026-02-16T12:31:17+0530 lvl=info msg="tunnel session started" obj=tunnels.session
+t=2026-02-16T12:31:18+0530 lvl=info msg="started tunnel" obj=tunnels name=command_line addr=http://localhost:4000 url=https://f2b4-2401-4900-51fe-859d-dc84-c8cf-b9d0-9daa.ngrok-free.app
+t=2026-02-16T12:31:30+0530 lvl=info msg=start pg=/api/tunnels id=5cb933741f286769
+t=2026-02-16T12:31:30+0530 lvl=info msg=end pg=/api/tunnels id=5cb933741f286769 status=200 dur=2.7214ms
+t=2026-02-16T12:31:37+0530 lvl=info msg="join connections" obj=join id=9b0a1de7b534 l=[::1]:4000 r=[2401:4900:51fe:859d:dc84:c8cf:b9d0:9daa]:53840

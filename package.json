@@ -1,0 +1,9 @@
+{
+  "name": "webhook-triger-algo",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "node backend/index.js"
+  }
+}
