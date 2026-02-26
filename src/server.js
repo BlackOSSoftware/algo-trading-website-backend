@@ -17,6 +17,49 @@ const {
 
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
+const CORS_ALLOW_CREDENTIALS = process.env.CORS_ALLOW_CREDENTIALS === "true";
+
+function setCorsHeaders(req, res) {
+  const requestOrigin = req.headers.origin;
+  let allowOrigin = CORS_ORIGIN;
+
+  if (CORS_ORIGIN === "*") {
+    allowOrigin =
+      CORS_ALLOW_CREDENTIALS && requestOrigin ? requestOrigin : "*";
+  } else if (requestOrigin) {
+    const allowList = CORS_ORIGIN.split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (allowList.length > 0) {
+      allowOrigin = allowList.includes(requestOrigin)
+        ? requestOrigin
+        : allowList[0];
+    }
+  }
+
+  res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+  if (allowOrigin !== "*" && requestOrigin) {
+    res.setHeader("Vary", "Origin");
+  }
+  if (CORS_ALLOW_CREDENTIALS) {
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+
+  const requestedHeaders = req.headers["access-control-request-headers"];
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    requestedHeaders || "Content-Type, Authorization"
+  );
+
+  const requestedMethod = req.headers["access-control-request-method"];
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    requestedMethod
+      ? `${requestedMethod},OPTIONS`
+      : "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+  );
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
 
 async function startServer() {
   await connectMongo();
@@ -28,12 +71,7 @@ async function startServer() {
   registerRoutes(router);
 
   const server = http.createServer(async (req, res) => {
-    res.setHeader("Access-Control-Allow-Origin", CORS_ORIGIN);
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization"
-    );
+    setCorsHeaders(req, res);
 
     if (req.method === "OPTIONS") {
       res.writeHead(204);
