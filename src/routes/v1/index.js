@@ -1,9 +1,10 @@
-const { chartinkWebhook } = require("../../controllers/webhook.controller");
+const { chartinkWebhook, razorpayWebhook } = require("../../controllers/webhook.controller");
 const {
   register,
   login,
   adminLogin,
   me,
+  verifyOtp,
 } = require("../../controllers/auth.controller");
 const {
   create,
@@ -26,6 +27,8 @@ const {
   list: listPlans,
   requestPlan,
   listUserRequests,
+  createPlanOrder,
+  verifyPlanPayment,
 } = require("../../controllers/plan.controller");
 const {
   listUsers,
@@ -38,20 +41,26 @@ const {
   listPlanRequestsAdmin,
   updatePlanRequestAdmin,
   sendTelegramAdminMessage,
+  sendEmailAdminMessage,
   setTelegramWebhook,
   getTelegramWebhookInfo,
   getTelegramStatus,
   listStrategiesAdmin,
   listAlertsAdmin,
+  getDashboardSummary,
+  approvePlanRequest,
+  rejectPlanRequest,
 } = require("../../controllers/admin.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 function registerV1Routes(router) {
   router.post("/api/v1/webhooks/chartink", chartinkWebhook);
+  router.post("/api/v1/webhook/razorpay", razorpayWebhook);
 
   router.post("/api/v1/auth/register", register);
   router.post("/api/v1/auth/login", login);
   router.post("/api/v1/auth/admin/login", adminLogin);
+  router.post("/api/v1/auth/verify-otp", verifyOtp);
   router.get("/api/v1/auth/me", requireAuth(me));
 
   router.post("/api/v1/strategies", requireAuth(create));
@@ -71,6 +80,8 @@ function registerV1Routes(router) {
 
   router.get("/api/v1/plans", listPlans);
   router.post("/api/v1/plans/request", requireAuth(requestPlan));
+  router.post("/api/v1/plans/create-order", requireAuth(createPlanOrder));
+  router.post("/api/v1/plans/verify-payment", requireAuth(verifyPlanPayment));
   router.get("/api/v1/plans/requests", requireAuth(listUserRequests));
 
   router.get("/api/v1/admin/users", requireAdmin(listUsers));
@@ -79,15 +90,19 @@ function registerV1Routes(router) {
   router.post("/api/v1/admin/telegram/subscribers/deactivate", requireAdmin(deactivateTelegramSubscriber));
   router.get("/api/v1/admin/telegram/tokens", requireAdmin(listTelegramTokens));
   router.post("/api/v1/admin/telegram/send", requireAdmin(sendTelegramAdminMessage));
+  router.post("/api/v1/admin/email/send", requireAdmin(sendEmailAdminMessage));
   router.post("/api/v1/admin/telegram/webhook", requireAdmin(setTelegramWebhook));
   router.get("/api/v1/admin/telegram/webhook", requireAdmin(getTelegramWebhookInfo));
   router.get("/api/v1/admin/telegram/status", requireAdmin(getTelegramStatus));
   router.get("/api/v1/admin/strategies", requireAdmin(listStrategiesAdmin));
   router.get("/api/v1/admin/alerts", requireAdmin(listAlertsAdmin));
+  router.get("/api/v1/admin/dashboard", requireAdmin(getDashboardSummary));
   router.post("/api/v1/admin/plans", requireAdmin(createPlanAdmin));
   router.get("/api/v1/admin/plans", requireAdmin(listPlansAdmin));
   router.get("/api/v1/admin/plan-requests", requireAdmin(listPlanRequestsAdmin));
   router.post("/api/v1/admin/plan-requests/update", requireAdmin(updatePlanRequestAdmin));
+  router.post("/api/v1/admin/plan-request/:id/approve", requireAdmin(approvePlanRequest));
+  router.post("/api/v1/admin/plan-request/:id/reject", requireAdmin(rejectPlanRequest));
 
   router.post("/api/v1/admin/marketmaya/trade", requireAdmin(tradeAdmin));
   router.post("/api/v1/admin/marketmaya/getcallhistory", requireAdmin(callHistoryAdmin));

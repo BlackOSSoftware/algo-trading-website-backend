@@ -21,6 +21,33 @@ function isTruthy(value) {
   return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
+function parseRatioMultiplier(value) {
+  const raw = normalizeString(value);
+  if (!raw) return null;
+  if (raw.includes(":") || raw.includes("/")) {
+    const divider = raw.includes(":") ? ":" : "/";
+    const [left, right] = raw.split(divider).map((item) => item.trim());
+    const a = Number(left);
+    const b = Number(right);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return null;
+    return b / a;
+  }
+
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric;
+}
+
+function computeTargetFromRatio(slValue, ratioValue) {
+  const sl = Number(normalizeString(slValue));
+  if (!Number.isFinite(sl) || sl <= 0) return null;
+  const multiplier = parseRatioMultiplier(ratioValue);
+  if (!multiplier) return null;
+  const target = sl * multiplier;
+  if (!Number.isFinite(target)) return null;
+  return String(Number(target.toFixed(6)));
+}
+
 function formatTradeNotification({ title, params, result }) {
   const exchange = normalizeString(params.exchange).toUpperCase();
   const segment = normalizeString(params.segment).toUpperCase();
@@ -110,6 +137,23 @@ function normalizeTradeParams(params) {
 
   if (!isTruthy(normalized.is_trail_sl)) {
     delete normalized.is_trail_sl;
+  }
+
+  const targetByRaw = normalizeString(normalized.target_by);
+  if (targetByRaw && targetByRaw.toLowerCase() === "ratio") {
+    const computed = computeTargetFromRatio(normalized.sl, normalized.target);
+    if (computed) {
+      normalized.target = computed;
+      const slByRaw = normalizeString(normalized.sl_by);
+      if (slByRaw) {
+        normalized.target_by = slByRaw;
+      } else {
+        delete normalized.target_by;
+      }
+    } else {
+      delete normalized.target;
+      delete normalized.target_by;
+    }
   }
 
   const symbolCode = normalizeString(normalized.symbol_code);

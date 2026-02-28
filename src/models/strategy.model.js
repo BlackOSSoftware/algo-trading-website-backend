@@ -64,7 +64,8 @@ async function updateStrategyByIdForUser(userId, strategyId, patch) {
     { returnDocument: "after" }
   );
 
-  return result?.value || null;
+  if (!result) return null;
+  return result.value ?? result;
 }
 
 async function deleteStrategyByIdForUser(userId, strategyId) {
@@ -76,7 +77,8 @@ async function deleteStrategyByIdForUser(userId, strategyId) {
     $and: [userQuery, idQuery],
   });
 
-  return result?.value || null;
+  if (!result) return null;
+  return result.value ?? result;
 }
 
 module.exports = {

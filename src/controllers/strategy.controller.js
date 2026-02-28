@@ -5,6 +5,7 @@ const { createHttpError } = require("../utils/httpError");
 const {
   createStrategy,
   listStrategies,
+  getStrategyByKey,
   getStrategyByIdForUser,
   updateStrategy,
   deleteStrategy,
@@ -18,6 +19,15 @@ function normalizeUrl(value) {
 
 function normalizeString(value) {
   return String(value || "").trim();
+}
+
+function normalizeTime(value, label) {
+  const raw = normalizeString(value);
+  if (!raw) return "";
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(raw)) {
+    throw createHttpError(400, `${label} must be in HH:mm (24h)`);
+  }
+  return raw;
 }
 
 function parseJsonObject(value, label) {
@@ -61,6 +71,28 @@ function normalizeMarketMayaConfig(value) {
   const trailSl = Boolean(trailSlRaw);
   const slMove = normalizeString(value.slMove || value.sl_move);
   const profitMove = normalizeString(value.profitMove || value.profit_move);
+  const tradeWindowStart = normalizeTime(
+    value.tradeWindowStart ??
+      value.trade_window_start ??
+      value.tradeStart ??
+      value.trade_start ??
+      value.tradeStartTime ??
+      value.trade_start_time ??
+      value.startTime ??
+      value.start_time,
+    "marketMaya.tradeWindowStart"
+  );
+  const tradeWindowEnd = normalizeTime(
+    value.tradeWindowEnd ??
+      value.trade_window_end ??
+      value.tradeEnd ??
+      value.trade_end ??
+      value.tradeEndTime ??
+      value.trade_end_time ??
+      value.endTime ??
+      value.end_time,
+    "marketMaya.tradeWindowEnd"
+  );
 
   const contract = normalizeString(value.contract).toUpperCase();
   const expiry = normalizeString(value.expiry).toUpperCase();
@@ -72,6 +104,10 @@ function normalizeMarketMayaConfig(value) {
   const maxSymbolsRaw = value.maxSymbols;
   const maxSymbols = maxSymbolsRaw !== undefined ? Number(maxSymbolsRaw) : undefined;
   const dryRun = Boolean(value.dryRun);
+  const dailyTradeLimitRaw =
+    value.dailyTradeLimit ?? value.daily_trade_limit ?? value.tradeLimit ?? value.trade_limit;
+  const dailyTradeLimit =
+    dailyTradeLimitRaw !== undefined ? Number(dailyTradeLimitRaw) : undefined;
 
   const extraParams = parseJsonObject(value.extraParams, "marketMaya.extraParams");
   const payloadMap = parseJsonObject(value.payloadMap, "marketMaya.payloadMap");
@@ -101,6 +137,11 @@ function normalizeMarketMayaConfig(value) {
     ...(trailSl ? { trailSl } : {}),
     ...(slMove ? { slMove } : {}),
     ...(profitMove ? { profitMove } : {}),
+    ...(tradeWindowStart ? { tradeWindowStart } : {}),
+    ...(tradeWindowEnd ? { tradeWindowEnd } : {}),
+    ...(Number.isFinite(dailyTradeLimit) && dailyTradeLimit > 0
+      ? { dailyTradeLimit: Math.floor(dailyTradeLimit) }
+      : {}),
     ...(Number.isFinite(maxSymbols) ? { maxSymbols } : {}),
     ...(dryRun ? { dryRun } : {}),
     ...(extraParams ? { extraParams } : {}),
@@ -199,6 +240,7 @@ async function update(req, res) {
 
   const body = await parseBody(req);
   const strategyId = String(body.strategyId || body._id || body.id || "").trim();
+  const webhookKey = normalizeString(body.webhookKey || body.webhook_key);
 
   const name = (body.name || "").trim();
   const marketMayaUrl = normalizeUrl(body.marketMayaUrl);
@@ -248,7 +290,16 @@ async function update(req, res) {
     patch["marketMaya.token"] = marketMayaToken;
   }
 
-  const updated = await updateStrategy(userId, strategyId, patch);
+  let updated = await updateStrategy(userId, strategyId, patch);
+  if (!updated && webhookKey) {
+    const byKey = await getStrategyByKey(webhookKey);
+    if (byKey && byKey.userId?.toString && byKey.userId.toString() === String(userId)) {
+      updated = await updateStrategy(userId, byKey._id, patch);
+    }
+  }
+  if (!updated) {
+    throw createHttpError(404, "Strategy not found");
+  }
 
   sendJson(res, 200, {
     ok: true,

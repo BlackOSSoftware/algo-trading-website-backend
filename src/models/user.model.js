@@ -22,15 +22,25 @@ async function createUser({
   role,
   planName,
   planExpiresAt,
+  phone,
+  emailVerified,
+  otpHash,
+  otpExpiresAt,
+  otpAttempts,
 }) {
   const now = new Date().toISOString();
   const user = {
     name,
     email: email.toLowerCase(),
     passwordHash,
+    phone: phone || null,
     role,
     planName: planName || null,
     planExpiresAt: planExpiresAt || null,
+    emailVerified: Boolean(emailVerified),
+    otpHash: otpHash || null,
+    otpExpiresAt: otpExpiresAt || null,
+    otpAttempts: Number.isFinite(otpAttempts) ? otpAttempts : 0,
     createdAt: now,
   };
 

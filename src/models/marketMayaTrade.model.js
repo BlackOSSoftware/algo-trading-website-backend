@@ -12,6 +12,13 @@ function asObjectId(value) {
   return ObjectId.isValid(raw) ? new ObjectId(raw) : null;
 }
 
+function buildStrategyQuery(strategyId) {
+  if (!strategyId) return null;
+  const raw = strategyId instanceof ObjectId ? strategyId.toString() : String(strategyId);
+  const id = ObjectId.isValid(raw) ? new ObjectId(raw) : null;
+  return id ? { $or: [{ strategyId: id }, { strategyId: raw }] } : { strategyId: raw };
+}
+
 async function insertMarketMayaTrade(trade) {
   const payload = { ...trade };
 
@@ -25,8 +32,27 @@ async function insertMarketMayaTrade(trade) {
   return payload;
 }
 
+async function countTradesByStrategyInRange(strategyId, startIso, endIso, executeOnly = true) {
+  const strategyQuery = buildStrategyQuery(strategyId);
+  if (!strategyQuery) return 0;
+
+  const rangeQuery = {};
+  if (startIso || endIso) {
+    rangeQuery.receivedAt = {};
+    if (startIso) rangeQuery.receivedAt.$gte = startIso;
+    if (endIso) rangeQuery.receivedAt.$lte = endIso;
+  }
+
+  const filters = [strategyQuery];
+  if (rangeQuery.receivedAt) filters.push(rangeQuery);
+  if (executeOnly) filters.push({ execute: true });
+
+  const query = filters.length === 1 ? filters[0] : { $and: filters };
+  return marketMayaTradesCollection().countDocuments(query);
+}
+
 module.exports = {
   marketMayaTradesCollection,
   insertMarketMayaTrade,
+  countTradesByStrategyInRange,
 };
-

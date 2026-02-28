@@ -1,11 +1,18 @@
 const crypto = require("crypto");
-const { parseBody } = require("../utils/body");
+const { parseBody, readBody } = require("../utils/body");
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
 const {
   saveWebhookEvent,
   updateWebhookEvent,
 } = require("../services/webhook.service");
+const { insertWebhookEvent, findWebhookEventById } = require("../models/webhookEvent.model");
+const { findPlanById } = require("../models/plan.model");
+const {
+  findPlanRequestByOrderId,
+  updatePlanRequestById,
+} = require("../models/planRequest.model");
+const { updateUserById } = require("../models/user.model");
 const { getStrategyByKey } = require("../services/strategy.service");
 const {
   sendTelegramMessage,
@@ -14,6 +21,7 @@ const {
 } = require("../services/telegram.service");
 const { findUserById, isPlanActive } = require("../services/user.service");
 const { executeStrategyAutoTrades } = require("../services/strategyAutoTrade.service");
+const { sendSignalEmail } = require("../services/email.service");
 
 function sanitizeHeaders(headers) {
   const blocked = new Set(["authorization", "cookie"]);
@@ -166,9 +174,16 @@ async function chartinkWebhook(req, res) {
     Promise.resolve()
       .then(async () => {
         const recipients = await collectRecipients(strategy);
+        const owner = await findUserById(strategy.userId.toString());
+        const ownerPlanActive = owner ? isPlanActive(owner) : false;
+        const ownerEmail = owner?.email ? String(owner.email) : "";
         const debug = {
           provider: "chartink",
           receivedAt,
+          email: {
+            enabled: Boolean(ownerEmail),
+            planActive: Boolean(ownerPlanActive),
+          },
           telegram: {
             enabled: Boolean(strategy.telegramEnabled),
             recipients: recipients.size,
@@ -177,6 +192,30 @@ async function chartinkWebhook(req, res) {
             enabled: Boolean(strategy.enabled),
           },
         };
+
+        if (ownerEmail && ownerPlanActive) {
+          const alertName =
+            payload?.alert_name || payload?.alertName || payload?.scan_name || "Signal";
+          const scanName = payload?.scan_name || payload?.scanName || "Chartink";
+          const stocks = payload?.stocks || payload?.symbol || payload?.symbol_code || "-";
+          try {
+            await sendSignalEmail({
+              to: ownerEmail,
+              name: owner?.name || "Trader",
+              strategyName: strategy.name,
+              alertName: String(alertName),
+              scanName: String(scanName),
+              stocks: String(stocks),
+              receivedAt,
+            });
+            debug.email.alert = { successCount: 1, failureCount: 0 };
+          } catch (err) {
+            debug.email.alert = { successCount: 0, failureCount: 1 };
+            debug.email.error = err instanceof Error ? err.message : "Email failed";
+          }
+        } else {
+          debug.email.alert = { successCount: 0, failureCount: 0, skipped: true };
+        }
 
         if (recipients.size > 0) {
           const tasks = Array.from(recipients).map((chatId) =>
@@ -256,4 +295,107 @@ async function chartinkWebhook(req, res) {
   });
 }
 
-module.exports = { chartinkWebhook };
+function safeEqual(a, b) {
+  if (!a || !b) return false;
+  const bufA = Buffer.from(String(a));
+  const bufB = Buffer.from(String(b));
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+async function razorpayWebhook(req, res) {
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!webhookSecret) {
+    throw createHttpError(500, "Razorpay webhook secret is not configured");
+  }
+
+  const rawBody = await readBody(req);
+  const signature = req.headers["x-razorpay-signature"];
+  const expected = crypto
+    .createHmac("sha256", webhookSecret)
+    .update(rawBody)
+    .digest("hex");
+
+  if (!safeEqual(expected, signature)) {
+    throw createHttpError(400, "Invalid webhook signature");
+  }
+
+  let payload = {};
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : {};
+  } catch (err) {
+    throw createHttpError(400, "Invalid webhook payload");
+  }
+
+  const fallbackId =
+    payload?.payload?.payment?.entity?.id ||
+    payload?.payload?.payment?.entity?.order_id ||
+    crypto.createHash("sha256").update(rawBody || "").digest("hex");
+  const eventId = payload.id || payload.event_id || fallbackId;
+  const existing = await findWebhookEventById(eventId);
+  if (existing?.processedAt) {
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (!existing) {
+    await insertWebhookEvent({
+      id: eventId,
+      provider: "razorpay",
+      receivedAt: new Date().toISOString(),
+      payload,
+    });
+  }
+
+  const eventType = payload.event;
+  const paymentEntity = payload?.payload?.payment?.entity || {};
+  const orderId = paymentEntity.order_id;
+  let processed = false;
+
+  if (eventType === "payment.captured" && orderId) {
+    const request = await findPlanRequestByOrderId(orderId);
+    if (request && !request.isProcessed) {
+      const plan = await findPlanById(request.planId);
+      if (plan) {
+        const startDate = new Date();
+        const endDate = new Date(
+          startDate.getTime() + Number(plan.durationDays || 0) * 86400000
+        );
+        await updatePlanRequestById(request._id, {
+          status: "active",
+          startDate: startDate.toISOString(),
+          endDate: endDate.toISOString(),
+          isProcessed: true,
+          razorpayPaymentId: paymentEntity.id || request.razorpayPaymentId || null,
+        });
+        await updateUserById(request.userId, {
+          planName: plan.name,
+          planExpiresAt: endDate.toISOString(),
+        });
+        processed = true;
+      }
+    }
+  }
+
+  if (eventType === "payment.failed" && orderId) {
+    const request = await findPlanRequestByOrderId(orderId);
+    if (request && !request.isProcessed) {
+      await updatePlanRequestById(request._id, {
+        status: "failed",
+        isProcessed: true,
+        razorpayPaymentId: paymentEntity.id || request.razorpayPaymentId || null,
+      });
+      processed = true;
+    }
+  }
+
+  await updateWebhookEvent(eventId, {
+    processedAt: new Date().toISOString(),
+    status: eventType || "unknown",
+    processed,
+  });
+
+  sendJson(res, 200, { ok: true });
+}
+
+module.exports = { chartinkWebhook, razorpayWebhook };

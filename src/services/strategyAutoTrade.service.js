@@ -1,9 +1,39 @@
 const crypto = require("crypto");
 const { customTrade, resolveToken } = require("./marketMaya.service");
-const { insertMarketMayaTrade } = require("../models/marketMayaTrade.model");
+const {
+  insertMarketMayaTrade,
+  countTradesByStrategyInRange,
+} = require("../models/marketMayaTrade.model");
 
 function normalizeString(value) {
   return String(value || "").trim();
+}
+
+function parseRatioMultiplier(value) {
+  const raw = normalizeString(value);
+  if (!raw) return null;
+  if (raw.includes(":") || raw.includes("/")) {
+    const divider = raw.includes(":") ? ":" : "/";
+    const [left, right] = raw.split(divider).map((item) => item.trim());
+    const a = Number(left);
+    const b = Number(right);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return null;
+    return b / a;
+  }
+
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric;
+}
+
+function computeTargetFromRatio(slValue, ratioValue) {
+  const sl = Number(normalizeString(slValue));
+  if (!Number.isFinite(sl) || sl <= 0) return null;
+  const multiplier = parseRatioMultiplier(ratioValue);
+  if (!multiplier) return null;
+  const target = sl * multiplier;
+  if (!Number.isFinite(target)) return null;
+  return String(Number(target.toFixed(6)));
 }
 
 function isTruthy(value) {
@@ -53,6 +83,68 @@ function clampMaxSymbols(value) {
   return Math.max(1, Math.min(Math.floor(raw), 25));
 }
 
+function parseTimeToMinutes(value) {
+  const raw = normalizeString(value);
+  if (!raw) return null;
+  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(raw);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function describeTradeWindow(startRaw, endRaw) {
+  if (startRaw && endRaw) return `${startRaw}-${endRaw}`;
+  if (startRaw) return `from ${startRaw}`;
+  if (endRaw) return `until ${endRaw}`;
+  return "";
+}
+
+function isWithinTradeWindow(now, startRaw, endRaw) {
+  const start = parseTimeToMinutes(startRaw);
+  const end = parseTimeToMinutes(endRaw);
+  if (start === null && end === null) return { allowed: true };
+
+  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+
+  let allowed = true;
+  if (start !== null && end !== null) {
+    if (start === end) {
+      allowed = true;
+    } else if (start < end) {
+      allowed = nowMinutes >= start && nowMinutes <= end;
+    } else {
+      allowed = nowMinutes >= start || nowMinutes <= end;
+    }
+  } else if (start !== null) {
+    allowed = nowMinutes >= start;
+  } else if (end !== null) {
+    allowed = nowMinutes <= end;
+  }
+
+  if (allowed) return { allowed: true };
+  const label = describeTradeWindow(startRaw, endRaw);
+  return {
+    allowed: false,
+    reason: label ? `Trade window closed (${label})` : "Trade window closed",
+  };
+}
+
+function normalizePositiveInt(value) {
+  const raw = value === undefined ? NaN : Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return Math.floor(raw);
+}
+
+function getDayRangeIso(dateInput) {
+  const base = dateInput instanceof Date && !Number.isNaN(dateInput.valueOf())
+    ? dateInput
+    : new Date();
+  const start = new Date(base);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(base);
+  end.setHours(23, 59, 59, 999);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
 function getStrategyIds(strategy) {
   const userId = strategy?.userId?.toString ? strategy.userId.toString() : String(strategy?.userId || "");
   const strategyId = strategy?._id?.toString ? strategy._id.toString() : String(strategy?._id || "");
@@ -94,10 +186,10 @@ function buildBaseParams({ strategy, payload }) {
   const qtyValue =
     normalizeString(readFirstPayloadValue(payload, ["qty_value", "qtyValue"])) ||
     normalizeString(cfg.qtyValue);
-  const targetBy =
+  let targetBy =
     normalizeString(readFirstPayloadValue(payload, ["target_by", "targetBy"])) ||
     normalizeString(cfg.targetBy);
-  const target =
+  let target =
     normalizeString(readFirstPayloadValue(payload, ["target"])) ||
     normalizeString(cfg.target);
   const slBy =
@@ -106,6 +198,17 @@ function buildBaseParams({ strategy, payload }) {
   const sl =
     normalizeString(readFirstPayloadValue(payload, ["sl"])) ||
     normalizeString(cfg.sl);
+
+  if (targetBy && targetBy.toLowerCase() === "ratio") {
+    const computed = computeTargetFromRatio(sl, target);
+    if (computed) {
+      target = computed;
+      targetBy = slBy || "";
+    } else {
+      target = "";
+      targetBy = "";
+    }
+  }
   const trailSlRaw = readFirstPayloadValue(payload, ["is_trail_sl", "isTrailSl", "trailSl"]);
   const trailSl = trailSlRaw !== undefined ? isTruthy(trailSlRaw) : isTruthy(cfg.trailSl);
   const slMove =
@@ -274,11 +377,54 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
   }
 
   const maxSymbols = clampMaxSymbols(cfg.maxSymbols);
+  const dailyTradeLimit = normalizePositiveInt(cfg.dailyTradeLimit);
+  const tradeWindowStart = normalizeString(cfg.tradeWindowStart);
+  const tradeWindowEnd = normalizeString(cfg.tradeWindowEnd);
+
+  if (tradeWindowStart || tradeWindowEnd) {
+    const baseDate = receivedAt ? new Date(receivedAt) : new Date();
+    const windowCheck = isWithinTradeWindow(baseDate, tradeWindowStart, tradeWindowEnd);
+    if (!windowCheck.allowed) {
+      return {
+        ok: false,
+        skipped: true,
+        execute,
+        error: windowCheck.reason || "Trade window closed",
+        total: 0,
+        successCount: 0,
+        failureCount: 0,
+        trades: [],
+      };
+    }
+  }
+
+  const { userId, strategyId } = getStrategyIds(strategy);
+  let remainingTrades = null;
+  if (dailyTradeLimit && execute) {
+    const baseDate = receivedAt ? new Date(receivedAt) : new Date();
+    const { startIso, endIso } = getDayRangeIso(baseDate);
+    const usedCount = await countTradesByStrategyInRange(strategyId, startIso, endIso, true);
+    remainingTrades = Math.max(dailyTradeLimit - usedCount, 0);
+    if (remainingTrades <= 0) {
+      return {
+        ok: false,
+        skipped: true,
+        execute,
+        error: `Daily trade limit reached (${dailyTradeLimit})`,
+        total: 0,
+        successCount: 0,
+        failureCount: 0,
+        trades: [],
+      };
+    }
+  }
 
   const { symbolCode, symbols } = extractSymbolsFromPayload(payload, cfg);
   const targets = symbolCode ? [{ symbolCode }] : symbols.slice(0, maxSymbols).map((s) => ({ symbol: s }));
+  const limitedTargets =
+    remainingTrades === null ? targets : targets.slice(0, Math.max(0, remainingTrades));
 
-  if (targets.length === 0) {
+  if (limitedTargets.length === 0) {
     return {
       ok: false,
       skipped: true,
@@ -289,9 +435,8 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
 
   const trades = [];
   const now = new Date().toISOString();
-  const { userId, strategyId } = getStrategyIds(strategy);
 
-  for (const target of targets) {
+  for (const target of limitedTargets) {
     const params = buildTradeParams({
       strategy,
       payload,

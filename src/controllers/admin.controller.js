@@ -1,8 +1,9 @@
+const { ObjectId } = require("mongodb");
 const { parseBody } = require("../utils/body");
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
 const { getDb } = require("../config/db");
-const { buildPlan, buildPlanWithDuration } = require("../services/user.service");
+const { buildPlan, buildPlanWithDuration, findUserById } = require("../services/user.service");
 const { listTokens } = require("../models/telegramToken.model");
 const {
   listActiveSubscribers,
@@ -12,6 +13,7 @@ const {
   sendTelegramText,
   getActiveSubscribers,
 } = require("../services/telegram.service");
+const { sendBroadcastEmail } = require("../services/email.service");
 const { getPollingStatus } = require("../services/telegramPolling.service");
 const { updateUserById } = require("../models/user.model");
 const {
@@ -27,6 +29,7 @@ const {
   listPlanRequestsByStatus,
   findPlanRequestById,
   updatePlanRequestStatus,
+  updatePlanRequestById,
 } = require("../models/planRequest.model");
 
 async function listUsers(req, res) {
@@ -125,7 +128,10 @@ async function listPlansAdmin(req, res) {
 async function listPlanRequestsAdmin(req, res) {
   const statusFilter = req.parsedUrl?.searchParams?.get("status");
   let requests;
-  if (statusFilter && ["pending", "approved", "rejected"].includes(statusFilter)) {
+  if (
+    statusFilter &&
+    ["pending", "paid", "active", "failed", "rejected", "approved"].includes(statusFilter)
+  ) {
     requests = await listPlanRequestsByStatus(statusFilter);
   } else {
     requests = await listPlanRequests();
@@ -171,6 +177,87 @@ async function updatePlanRequestAdmin(req, res) {
   sendJson(res, 200, { ok: true, request: updated });
 }
 
+async function approvePlanRequest(req, res) {
+  const requestId = req.params?.id;
+  if (!requestId) {
+    throw createHttpError(400, "requestId is required");
+  }
+
+  const request = await findPlanRequestById(requestId);
+  if (!request) {
+    throw createHttpError(404, "Request not found");
+  }
+
+  if (request.status !== "paid") {
+    throw createHttpError(409, "Only paid requests can be approved");
+  }
+
+  if (request.isProcessed) {
+    throw createHttpError(409, "Request already processed");
+  }
+
+  const plan = await findPlanById(request.planId);
+  if (!plan) {
+    throw createHttpError(404, "Plan not found");
+  }
+
+  const user = await findUserById(request.userId);
+  if (user?.planExpiresAt) {
+    const expiresAt = new Date(user.planExpiresAt).getTime();
+    const currentPlan = String(user.planName || "").trim().toLowerCase();
+    const nextPlan = String(plan.name || "").trim().toLowerCase();
+    if (!Number.isNaN(expiresAt) && expiresAt > Date.now() && currentPlan === nextPlan) {
+      throw createHttpError(409, "User already has an active plan");
+    }
+  }
+
+  const startDate = new Date();
+  const endDate = new Date(
+    startDate.getTime() + Number(plan.durationDays || 0) * 86400000
+  );
+
+  const updated = await updatePlanRequestById(requestId, {
+    status: "active",
+    startDate: startDate.toISOString(),
+    endDate: endDate.toISOString(),
+    isProcessed: true,
+  });
+
+  await updateUserById(request.userId, {
+    planName: plan.name,
+    planExpiresAt: endDate.toISOString(),
+  });
+
+  sendJson(res, 200, { ok: true, request: updated });
+}
+
+async function rejectPlanRequest(req, res) {
+  const requestId = req.params?.id;
+  if (!requestId) {
+    throw createHttpError(400, "requestId is required");
+  }
+
+  const request = await findPlanRequestById(requestId);
+  if (!request) {
+    throw createHttpError(404, "Request not found");
+  }
+
+  if (request.status === "active") {
+    throw createHttpError(409, "Active requests cannot be rejected");
+  }
+
+  if (request.isProcessed) {
+    throw createHttpError(409, "Request already processed");
+  }
+
+  const updated = await updatePlanRequestById(requestId, {
+    status: "rejected",
+    isProcessed: true,
+  });
+
+  sendJson(res, 200, { ok: true, request: updated });
+}
+
 async function sendTelegramAdminMessage(req, res) {
   const body = await parseBody(req);
   const message = (body.message || "").trim();
@@ -207,6 +294,56 @@ async function sendTelegramAdminMessage(req, res) {
   }
 
   await sendTelegramText(chatId, message);
+  sendJson(res, 200, { ok: true, sent: 1 });
+}
+
+async function sendEmailAdminMessage(req, res) {
+  const body = await parseBody(req);
+  const subject = (body.subject || "").toString().trim();
+  const message = (body.message || "").toString().trim();
+  const email = (body.email || "").toString().trim().toLowerCase();
+  const broadcast = body.broadcast === true;
+
+  if (!subject || !message) {
+    throw createHttpError(400, "subject and message are required");
+  }
+
+  if (!broadcast && !email) {
+    throw createHttpError(400, "email is required if broadcast is false");
+  }
+
+  if (broadcast) {
+    const users = await getDb()
+      .collection("users")
+      .find()
+      .project({ email: 1 })
+      .toArray();
+
+    const targets = users
+      .map((user) => (user.email || "").toString().trim().toLowerCase())
+      .filter(Boolean);
+
+    if (targets.length === 0) {
+      throw createHttpError(400, "No users with email found");
+    }
+
+    let sent = 0;
+    const failed = [];
+
+    for (const target of targets) {
+      try {
+        await sendBroadcastEmail({ to: target, subject, message });
+        sent += 1;
+      } catch (err) {
+        failed.push({ email: target });
+      }
+    }
+
+    sendJson(res, 200, { ok: true, sent, failed });
+    return;
+  }
+
+  await sendBroadcastEmail({ to: email, subject, message });
   sendJson(res, 200, { ok: true, sent: 1 });
 }
 
@@ -365,6 +502,120 @@ async function listAlertsAdmin(req, res) {
   sendJson(res, 200, { ok: true, alerts });
 }
 
+function normalizeObjectId(value) {
+  if (!value) return null;
+  if (value instanceof ObjectId) return value;
+  const raw = String(value);
+  if (!ObjectId.isValid(raw)) return null;
+  return new ObjectId(raw);
+}
+
+async function getDashboardSummary(req, res) {
+  const db = getDb();
+  const usersCollection = db.collection("users");
+  const strategiesCollection = db.collection("strategies");
+  const eventsCollection = db.collection("webhook_events");
+  const planRequestsCollection = db.collection("plan_requests");
+  const subscribersCollection = db.collection("telegram_subscribers");
+
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
+
+  const alertsTodayQuery = {
+    $or: [
+      { receivedAt: { $gte: startIso, $lt: endIso } },
+      { receivedAt: { $gte: start, $lt: end } },
+    ],
+  };
+
+  const [
+    totalUsers,
+    totalStrategies,
+    activeStrategies,
+    alertsToday,
+    pendingPlanRequests,
+    telegramSubscribers,
+    latestAlertsRaw,
+    recentUsersRaw,
+  ] = await Promise.all([
+    usersCollection.countDocuments(),
+    strategiesCollection.countDocuments(),
+    strategiesCollection.countDocuments({ enabled: true }),
+    eventsCollection.countDocuments(alertsTodayQuery),
+    planRequestsCollection.countDocuments({ status: "pending" }),
+    subscribersCollection.countDocuments({ active: true }),
+    eventsCollection.find().sort({ receivedAt: -1 }).limit(5).toArray(),
+    usersCollection
+      .find()
+      .project({ name: 1, email: 1, role: 1, planName: 1, createdAt: 1 })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray(),
+  ]);
+
+  const uniqueUserIds = [];
+  const seenUsers = new Set();
+  latestAlertsRaw.forEach((alert) => {
+    const id = normalizeObjectId(alert.userId);
+    if (!id) return;
+    const key = id.toString();
+    if (seenUsers.has(key)) return;
+    seenUsers.add(key);
+    uniqueUserIds.push(id);
+  });
+
+  const userDocs =
+    uniqueUserIds.length > 0
+      ? await usersCollection
+          .find({ _id: { $in: uniqueUserIds } })
+          .project({ name: 1, email: 1 })
+          .toArray()
+      : [];
+
+  const userMap = new Map(userDocs.map((user) => [user._id.toString(), user]));
+
+  const latestAlerts = latestAlertsRaw.map((alert) => {
+    const userId = normalizeObjectId(alert.userId);
+    const userKey = userId ? userId.toString() : "";
+    const user = userKey ? userMap.get(userKey) : null;
+    return {
+      id: alert.id || (alert._id ? alert._id.toString() : undefined),
+      receivedAt: alert.receivedAt,
+      strategyName: alert.strategyName,
+      payload: alert.payload,
+      user: user
+        ? { id: user._id.toString(), name: user.name || "", email: user.email || "" }
+        : null,
+    };
+  });
+
+  const recentUsers = recentUsersRaw.map((user) => ({
+    id: user._id ? user._id.toString() : "",
+    name: user.name || "",
+    email: user.email || "",
+    role: user.role || "",
+    planName: user.planName || null,
+    createdAt: user.createdAt || null,
+  }));
+
+  sendJson(res, 200, {
+    ok: true,
+    totals: {
+      users: totalUsers,
+      strategies: totalStrategies,
+      activeStrategies,
+      alertsToday,
+      pendingPlanRequests,
+      telegramSubscribers,
+    },
+    latestAlerts,
+    recentUsers,
+  });
+}
+
 module.exports = {
   listUsers,
   updatePlan,
@@ -376,9 +627,13 @@ module.exports = {
   listPlanRequestsAdmin,
   updatePlanRequestAdmin,
   sendTelegramAdminMessage,
+  sendEmailAdminMessage,
   setTelegramWebhook,
   getTelegramWebhookInfo,
   getTelegramStatus,
   listStrategiesAdmin,
   listAlertsAdmin,
+  getDashboardSummary,
+  approvePlanRequest,
+  rejectPlanRequest,
 };

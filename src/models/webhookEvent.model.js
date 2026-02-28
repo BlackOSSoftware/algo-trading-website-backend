@@ -5,6 +5,11 @@ function webhookEventsCollection() {
   return getDb().collection("webhook_events");
 }
 
+async function findWebhookEventById(eventId) {
+  if (!eventId) return null;
+  return webhookEventsCollection().findOne({ id: String(eventId) });
+}
+
 async function insertWebhookEvent(event) {
   const payload = { ...event };
   if (payload.userId) {
@@ -69,6 +74,7 @@ async function deleteEventsByUserAndStrategy(userId, strategyId) {
 
 module.exports = {
   webhookEventsCollection,
+  findWebhookEventById,
   insertWebhookEvent,
   updateWebhookEventById,
   findEventsByUser,
