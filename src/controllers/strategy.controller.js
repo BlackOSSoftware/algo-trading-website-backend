@@ -324,11 +324,16 @@ async function update(req, res) {
     throw createHttpError(404, "Strategy not found");
   }
 
+  const safeUpdated = sanitizeStrategy(updated) || {};
+  const resolvedWebhookKey = normalizeString(
+    updated?.webhookKey || existing?.webhookKey || webhookKey
+  );
+
   sendJson(res, 200, {
     ok: true,
     strategy: {
-      ...sanitizeStrategy(updated),
-      webhookPath: buildWebhookPath(updated.webhookKey),
+      ...safeUpdated,
+      webhookPath: buildWebhookPath(resolvedWebhookKey),
     },
   });
 }

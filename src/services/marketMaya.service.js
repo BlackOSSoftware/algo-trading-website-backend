@@ -1,4 +1,6 @@
 const DEFAULT_BASE_URL = "https://restapi.marketmaya.com";
+const DEFAULT_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 function normalizeBaseUrl(value) {
   const trimmed = String(value || "").trim();
@@ -11,6 +13,57 @@ function resolveBaseUrl(override) {
   if (normalizedOverride) return normalizedOverride;
   const normalizedEnv = normalizeBaseUrl(process.env.MARKETMAYA_BASE_URL);
   return normalizedEnv || DEFAULT_BASE_URL;
+}
+
+function getUserAgent() {
+  const fromEnv = String(process.env.MARKETMAYA_USER_AGENT || "").trim();
+  return fromEnv || DEFAULT_USER_AGENT;
+}
+
+function redactSensitiveText(text) {
+  return String(text || "")
+    .replace(/([?&]token=)([^&\s"'<]+)/gi, "$1[REDACTED]")
+    .replace(/(["'\s])token([=:]\s*)([^\s"'&<>]{8,})/gi, "$1token$2[REDACTED]");
+}
+
+function normalizeWhitespace(text) {
+  return String(text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toSafeSnippet(text, max = 260) {
+  const raw = normalizeWhitespace(redactSensitiveText(text));
+  if (!raw) return "";
+  if (raw.length <= max) return raw;
+  return `${raw.slice(0, max - 3)}...`;
+}
+
+function looksLikeHtml(payload, contentType) {
+  if (String(contentType || "").toLowerCase().includes("text/html")) return true;
+  if (typeof payload !== "string") return false;
+  const sample = payload.slice(0, 400).toLowerCase();
+  return sample.includes("<!doctype html") || sample.includes("<html");
+}
+
+function isCloudflareChallenge(payload, contentType) {
+  if (!looksLikeHtml(payload, contentType)) return false;
+  if (typeof payload !== "string") return false;
+  const normalized = payload.toLowerCase();
+  return (
+    normalized.includes("just a moment") ||
+    normalized.includes("cloudflare") ||
+    normalized.includes("cf-chl") ||
+    normalized.includes("cf-ray")
+  );
+}
+
+function extractChallengeRayId(payload, headers) {
+  const fromHeader = String(headers?.cfRay || "").trim();
+  if (fromHeader) return fromHeader;
+  if (typeof payload !== "string") return "";
+  const match = /cf-ray[:\s]*([a-z0-9-]+)/i.exec(payload);
+  return match ? String(match[1] || "").trim() : "";
 }
 
 
@@ -265,7 +318,13 @@ async function fetchMarketMayaJson(url, timeoutMs) {
   try {
     const response = await fetch(url, {
       method: "GET",
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache",
+        "User-Agent": getUserAgent(),
+      },
       signal: controller.signal,
     });
 
@@ -279,6 +338,10 @@ async function fetchMarketMayaJson(url, timeoutMs) {
       ok: response.ok,
       status: response.status,
       contentType,
+      headers: {
+        cfRay: response.headers.get("cf-ray") || "",
+        server: response.headers.get("server") || "",
+      },
       payload,
     };
   } finally {
@@ -293,19 +356,35 @@ function getTimeoutMs() {
   return 15_000;
 }
 
-function extractErrorMessage(payload) {
+function extractErrorMessage(payload, meta = {}) {
+  const contentType = meta.contentType || "";
+  const headers = meta.headers || {};
+  const status = meta.status;
+
   if (!payload) return "Market Maya request failed";
-  if (typeof payload === "string") return payload;
+  if (isCloudflareChallenge(payload, contentType)) {
+    const rayId = extractChallengeRayId(payload, headers);
+    const suffix = rayId ? ` (CF-RAY: ${rayId})` : "";
+    return `Market Maya request was blocked by Cloudflare challenge${suffix}. Retry shortly or whitelist server IP.`;
+  }
+  if (looksLikeHtml(payload, contentType)) {
+    return "Market Maya returned an HTML page instead of API response.";
+  }
+  if (typeof payload === "string") {
+    const snippet = toSafeSnippet(payload);
+    if (snippet) return snippet;
+    return status ? `Market Maya API error (${status})` : "Market Maya request failed";
+  }
   if (typeof payload !== "object") return String(payload);
 
   const candidates = ["message", "error", "description", "msg", "detail"];
   for (const key of candidates) {
     const value = payload[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "string" && value.trim()) return toSafeSnippet(value);
   }
 
   try {
-    return JSON.stringify(payload);
+    return toSafeSnippet(JSON.stringify(payload));
   } catch {
     return "Market Maya request failed";
   }
@@ -341,7 +420,7 @@ async function customTrade({ token, params, execute, baseUrl }) {
       ok: false,
       dryRun: false,
       status: result.status,
-      error: `Market Maya API error (${result.status}): ${extractErrorMessage(result.payload)}`,
+      error: `Market Maya API error (${result.status}): ${extractErrorMessage(result.payload, result)}`,
       result,
     };
   }
@@ -368,7 +447,7 @@ async function getCallHistory({ token, execute, baseUrl }) {
         ok: false,
         dryRun: false,
         status: result.status,
-        error: extractErrorMessage(result.payload),
+        error: extractErrorMessage(result.payload, result),
         result,
       };
     }
@@ -393,7 +472,7 @@ async function getSymbolPosition({ token, execute, baseUrl }) {
         ok: false,
         dryRun: false,
         status: result.status,
-        error: extractErrorMessage(result.payload),
+        error: extractErrorMessage(result.payload, result),
         result,
       };
     }
