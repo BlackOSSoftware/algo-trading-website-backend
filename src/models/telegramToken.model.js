@@ -31,6 +31,20 @@ async function markTokenUsed(token, chatId) {
   return findTokenRecord(token);
 }
 
+async function expireTokensByUser(userId, reason = "replaced") {
+  const now = new Date().toISOString();
+  await tokensCollection().updateMany(
+    { userId: new ObjectId(userId) },
+    {
+      $set: {
+        expiresAt: now,
+        revokedAt: now,
+        revokedReason: reason,
+      },
+    }
+  );
+}
+
 async function listTokensByUser(userId, limit = 10) {
   return tokensCollection()
     .find({ userId: new ObjectId(userId) })
@@ -52,6 +66,7 @@ module.exports = {
   createTokenRecord,
   findTokenRecord,
   markTokenUsed,
+  expireTokensByUser,
   listTokensByUser,
   listTokens,
 };

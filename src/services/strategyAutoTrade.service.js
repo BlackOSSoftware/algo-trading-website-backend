@@ -68,6 +68,12 @@ function toUpper(value) {
   return raw ? raw.toUpperCase() : "";
 }
 
+function normalizeCallType(value) {
+  const side = toUpper(value);
+  if (side === "BUY" || side === "SELL") return side;
+  return "";
+}
+
 function splitSymbols(value) {
   const raw = normalizeString(value);
   if (!raw) return [];
@@ -134,6 +140,81 @@ function normalizePositiveInt(value) {
   return Math.floor(raw);
 }
 
+function normalizePositiveNumber(value) {
+  const raw = value === undefined || value === null || value === "" ? NaN : Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return null;
+  return raw;
+}
+
+function normalizeNonNegativeNumber(value) {
+  const raw = value === undefined || value === null || value === "" ? NaN : Number(value);
+  if (!Number.isFinite(raw) || raw < 0) return null;
+  return raw;
+}
+
+function formatNumber(value) {
+  return String(Number(value.toFixed(6)));
+}
+
+function normalizeBufferBy(value) {
+  const raw = normalizeString(value).toLowerCase();
+  if (!raw) return "";
+  if (raw === "point" || raw === "points") return "point";
+  if (raw === "percentage" || raw === "percent" || raw === "%") return "percentage";
+  return raw;
+}
+
+function normalizeQtyMode(value) {
+  const raw = normalizeString(value).toLowerCase();
+  if (!raw) return "";
+  if (raw === "fix" || raw === "fixed") return "fix";
+  if (raw === "capital(%)" || raw === "capital" || raw === "capitalpercent") return "capital";
+  return raw;
+}
+
+function readTriggerPrice(payload) {
+  const raw = readFirstPayloadValue(payload, [
+    "trigger_price",
+    "triggerPrice",
+    "entry_price",
+    "entryPrice",
+    "price",
+    "ltp",
+    "last_price",
+    "lastPrice",
+    "close",
+    "close_price",
+    "closePrice",
+  ]);
+  return normalizePositiveNumber(raw);
+}
+
+function applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy) {
+  if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) return null;
+  if (!Number.isFinite(bufferValue) || bufferValue < 0) return null;
+  if (bufferValue === 0) return triggerPrice;
+
+  const mode = normalizeBufferBy(bufferBy) || "point";
+  const offset =
+    mode === "percentage" ? (triggerPrice * bufferValue) / 100 : bufferValue;
+  if (!Number.isFinite(offset) || offset < 0) return null;
+  if (offset === 0) return triggerPrice;
+
+  const side = toUpper(callType);
+  const adjusted = side === "SELL" ? triggerPrice - offset : triggerPrice + offset;
+  if (!Number.isFinite(adjusted) || adjusted <= 0) return null;
+  return adjusted;
+}
+
+function computeCapitalQty({ capitalAmount, qtyPercent, stockPrice }) {
+  if (!Number.isFinite(capitalAmount) || capitalAmount <= 0) return null;
+  if (!Number.isFinite(qtyPercent) || qtyPercent <= 0) return null;
+  if (!Number.isFinite(stockPrice) || stockPrice <= 0) return null;
+  const qty = Math.floor((capitalAmount * qtyPercent / 100) / stockPrice);
+  if (!Number.isFinite(qty) || qty <= 0) return null;
+  return qty;
+}
+
 function getDayRangeIso(dateInput) {
   const base = dateInput instanceof Date && !Number.isNaN(dateInput.valueOf())
     ? dateInput
@@ -170,8 +251,9 @@ function buildBaseParams({ strategy, payload }) {
 
   const callTypeKey = normalizeString(cfg.callTypeKey) || "call_type";
   const callType =
-    toUpper(readFirstPayloadValue(payload, [callTypeKey, "call_type", "callType", "action", "side"])) ||
-    toUpper(cfg.callTypeFallback);
+    normalizeCallType(
+      readFirstPayloadValue(payload, [callTypeKey, "call_type", "callType", "action", "side"])
+    ) || normalizeCallType(cfg.callTypeFallback);
 
   const orderType =
     toUpper(readFirstPayloadValue(payload, ["order_type", "orderType"])) ||
@@ -179,6 +261,21 @@ function buildBaseParams({ strategy, payload }) {
   const limitPrice =
     normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
     normalizeString(cfg.limitPrice);
+  const limitPriceNumeric = normalizePositiveNumber(limitPrice);
+  const triggerPrice = readTriggerPrice(payload);
+  const bufferByRaw =
+    readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
+  const legacyBufferValueRaw =
+    readFirstPayloadValue(payload, ["buffer_points", "bufferPoints"]) ?? cfg.bufferPoints;
+  const bufferValueRaw =
+    readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
+    cfg.bufferValue ??
+    legacyBufferValueRaw;
+  const bufferBy = normalizeBufferBy(bufferByRaw) || (bufferValueRaw !== undefined ? "point" : "");
+  const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
+  const bufferedPrice = applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy);
+  const effectivePrice = bufferedPrice ?? triggerPrice ?? limitPriceNumeric;
+  const priceForLimitOrder = bufferedPrice !== null ? formatNumber(bufferedPrice) : limitPrice;
 
   const qtyDistribution =
     normalizeString(readFirstPayloadValue(payload, ["qty_distribution", "qtyDistribution"])) ||
@@ -186,6 +283,47 @@ function buildBaseParams({ strategy, payload }) {
   const qtyValue =
     normalizeString(readFirstPayloadValue(payload, ["qty_value", "qtyValue"])) ||
     normalizeString(cfg.qtyValue);
+  const qtyMode = normalizeQtyMode(qtyDistribution);
+  const capitalAmountRaw =
+    readFirstPayloadValue(payload, ["capital_amount", "capitalAmount"]) ?? cfg.capitalAmount;
+  const capitalAmount = normalizePositiveNumber(capitalAmountRaw);
+  let resolvedQtyDistribution = qtyDistribution;
+  let resolvedQtyValue = qtyValue;
+  let buildError = "";
+  if (bufferBy) {
+    if (bufferValue === null) {
+      buildError = "Trade buffer value must be zero or a positive number";
+    } else if (!callType && bufferValue > 0) {
+      buildError = "call_type is required for trade buffer";
+    } else if (!triggerPrice) {
+      buildError = "Trigger price is required for trade buffer";
+    } else if (bufferValue > 0 && bufferedPrice === null) {
+      buildError = "Trade buffer produced invalid price";
+    }
+  }
+
+  if (qtyMode === "capital") {
+    const qtyPercent = normalizePositiveNumber(qtyValue);
+    const computedQty = computeCapitalQty({
+      capitalAmount,
+      qtyPercent,
+      stockPrice: effectivePrice,
+    });
+
+    if (!buildError && !capitalAmount) {
+      buildError = "Capital amount is required for Capital(%) qty mode";
+    } else if (!buildError && !qtyPercent) {
+      buildError = "Qty value must be a positive percentage for Capital(%) qty mode";
+    } else if (!buildError && !effectivePrice) {
+      buildError = "Trigger price is required for Capital(%) qty mode";
+    } else if (!buildError && !computedQty) {
+      buildError = "Computed quantity is less than 1 for Capital(%) qty mode";
+    } else if (!buildError) {
+      resolvedQtyDistribution = "Fix";
+      resolvedQtyValue = String(computedQty);
+    }
+  }
+
   let targetBy =
     normalizeString(readFirstPayloadValue(payload, ["target_by", "targetBy"])) ||
     normalizeString(cfg.targetBy);
@@ -220,15 +358,16 @@ function buildBaseParams({ strategy, payload }) {
 
   return {
     cfg,
+    buildError,
     base: {
       ...extraParams,
       exchange,
       segment,
       ...(callType ? { call_type: callType } : {}),
       ...(orderType ? { order_type: orderType } : {}),
-      ...(orderType === "LIMIT" && limitPrice ? { price: limitPrice } : {}),
-      ...(qtyDistribution ? { qty_distribution: qtyDistribution } : {}),
-      ...(qtyValue ? { qty_value: qtyValue } : {}),
+      ...(orderType === "LIMIT" && priceForLimitOrder ? { price: priceForLimitOrder } : {}),
+      ...(resolvedQtyDistribution ? { qty_distribution: resolvedQtyDistribution } : {}),
+      ...(resolvedQtyValue ? { qty_value: resolvedQtyValue } : {}),
       ...(targetBy ? { target_by: targetBy } : {}),
       ...(target ? { target } : {}),
       ...(slBy ? { sl_by: slBy } : {}),
@@ -334,7 +473,7 @@ function extractSymbolsFromPayload(payload, cfg) {
 }
 
 function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
-  const { cfg, base } = buildBaseParams({ strategy, payload });
+  const { cfg, base, buildError } = buildBaseParams({ strategy, payload });
 
   let params = { ...base };
   params = applyPayloadMap(params, payload, cfg);
@@ -348,16 +487,17 @@ function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
     delete params.symbol_code;
   }
 
-  return params;
+  return { params, buildError };
 }
 
 function validateMinimumParams(params) {
   const exchange = normalizeString(params.exchange);
-  const callType = normalizeString(params.call_type);
+  const callType = normalizeString(params.call_type).toUpperCase();
   const symbolCode = normalizeString(params.symbol_code);
   const symbol = normalizeString(params.symbol);
   if (!exchange) return "exchange is required";
   if (!callType) return "call_type is required";
+  if (callType !== "BUY" && callType !== "SELL") return "call_type must be BUY or SELL";
   if (!symbolCode && !symbol) return "symbol or symbol_code is required";
   return null;
 }
@@ -437,14 +577,15 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
   const now = new Date().toISOString();
 
   for (const target of limitedTargets) {
-    const params = buildTradeParams({
+    const built = buildTradeParams({
       strategy,
       payload,
       symbol: target.symbol,
       symbolCode: target.symbolCode,
     });
+    const params = built.params;
 
-    const minError = validateMinimumParams(params);
+    const minError = built.buildError || validateMinimumParams(params);
     if (minError) {
       const error = `Auto trade skipped: ${minError}`;
       const entry = {

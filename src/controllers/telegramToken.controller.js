@@ -4,7 +4,9 @@ const { createHttpError } = require("../utils/httpError");
 const {
   createTokenRecord,
   listTokensByUser,
+  expireTokensByUser,
 } = require("../models/telegramToken.model");
+const { deactivateSubscribersByUser } = require("../models/telegramSubscriber.model");
 const { findUserById, isPlanActive } = require("../services/user.service");
 
 function buildToken() {
@@ -24,6 +26,9 @@ async function createToken(req, res) {
 
   const now = new Date().toISOString();
   const expiresAt = user.planExpiresAt;
+
+  await expireTokensByUser(userId, "replaced_by_new_token");
+  await deactivateSubscribersByUser(userId);
 
   const token = buildToken();
   const record = await createTokenRecord({

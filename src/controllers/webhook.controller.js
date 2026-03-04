@@ -53,19 +53,19 @@ function getStrategyKey(req) {
   return headerKey || queryKey || null;
 }
 
-async function collectRecipients(strategy) {
+async function collectRecipients(strategy, ownerPlanActive) {
   const recipients = new Set();
-  if (strategy.telegramEnabled && strategy.telegramChatId) {
+  if (!ownerPlanActive) return recipients;
+  if (!strategy?.telegramEnabled) return recipients;
+
+  if (strategy.telegramChatId) {
     recipients.add(String(strategy.telegramChatId));
   }
 
-  const owner = await findUserById(strategy.userId.toString());
-  if (owner && isPlanActive(owner)) {
-    const subscribers = await getActiveSubscribersForUser(strategy.userId.toString());
-    subscribers.forEach((sub) => {
-      if (sub?.chatId) recipients.add(String(sub.chatId));
-    });
-  }
+  const subscribers = await getActiveSubscribersForUser(strategy.userId.toString());
+  subscribers.forEach((sub) => {
+    if (sub?.chatId) recipients.add(String(sub.chatId));
+  });
 
   return recipients;
 }
@@ -173,9 +173,9 @@ async function chartinkWebhook(req, res) {
   setImmediate(() => {
     Promise.resolve()
       .then(async () => {
-        const recipients = await collectRecipients(strategy);
         const owner = await findUserById(strategy.userId.toString());
         const ownerPlanActive = owner ? isPlanActive(owner) : false;
+        const recipients = await collectRecipients(strategy, ownerPlanActive);
         const ownerEmail = owner?.email ? String(owner.email) : "";
         const debug = {
           provider: "chartink",
@@ -186,6 +186,7 @@ async function chartinkWebhook(req, res) {
           },
           telegram: {
             enabled: Boolean(strategy.telegramEnabled),
+            planActive: Boolean(ownerPlanActive),
             recipients: recipients.size,
           },
           marketMaya: {

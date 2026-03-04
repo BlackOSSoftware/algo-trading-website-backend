@@ -36,6 +36,14 @@ async function deactivateSubscriber(chatId) {
   return subscribersCollection().findOne({ chatId: String(chatId) });
 }
 
+async function deactivateSubscribersByUser(userId) {
+  const now = new Date().toISOString();
+  await subscribersCollection().updateMany(
+    { userId: String(userId), active: true },
+    { $set: { active: false, updatedAt: now } }
+  );
+}
+
 async function listActiveSubscribers() {
   return subscribersCollection().find({ active: true }).toArray();
 }
@@ -50,6 +58,7 @@ module.exports = {
   subscribersCollection,
   upsertSubscriber,
   deactivateSubscriber,
+  deactivateSubscribersByUser,
   listActiveSubscribers,
   listActiveSubscribersByUser,
 };

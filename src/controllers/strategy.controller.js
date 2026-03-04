@@ -57,9 +57,21 @@ function normalizeMarketMayaConfig(value) {
   const symbolMode = normalizeString(value.symbolMode) || "stocksFirst";
   const symbolKey = normalizeString(value.symbolKey) || "symbol";
   const callTypeKey = normalizeString(value.callTypeKey) || "call_type";
-  const callTypeFallback = normalizeString(value.callTypeFallback).toUpperCase() || "BUY";
+  const callTypeFallback = normalizeString(value.callTypeFallback).toUpperCase();
+  if (callTypeFallback && callTypeFallback !== "BUY" && callTypeFallback !== "SELL") {
+    throw createHttpError(400, "marketMaya.callTypeFallback must be BUY or SELL");
+  }
   const orderType = normalizeString(value.orderType || value.order_type).toUpperCase();
   const limitPrice = normalizeString(value.limitPrice || value.limit_price);
+  const bufferBy = normalizeString(value.bufferBy || value.buffer_by);
+  const bufferValueRaw =
+    value.bufferValue ??
+    value.buffer_value ??
+    value.bufferPoints ??
+    value.buffer_points;
+  const bufferValue = bufferValueRaw !== undefined ? Number(bufferValueRaw) : undefined;
+  const capitalAmountRaw = value.capitalAmount ?? value.capital_amount;
+  const capitalAmount = capitalAmountRaw !== undefined ? Number(capitalAmountRaw) : undefined;
 
   const qtyDistribution = normalizeString(value.qtyDistribution || value.qty_distribution);
   const qtyValue = normalizeString(value.qtyValue || value.qty_value);
@@ -128,6 +140,9 @@ function normalizeMarketMayaConfig(value) {
     ...(strikePrice ? { strikePrice } : {}),
     ...(orderType ? { orderType } : {}),
     ...(limitPrice ? { limitPrice } : {}),
+    ...(bufferBy ? { bufferBy } : {}),
+    ...(Number.isFinite(bufferValue) && bufferValue >= 0 ? { bufferValue } : {}),
+    ...(Number.isFinite(capitalAmount) && capitalAmount > 0 ? { capitalAmount } : {}),
     ...(qtyDistribution ? { qtyDistribution } : {}),
     ...(qtyValue ? { qtyValue } : {}),
     ...(targetBy ? { targetBy } : {}),
@@ -157,6 +172,11 @@ function sanitizeStrategy(strategy) {
     safe.marketMaya = { ...rest, tokenConfigured: Boolean(token) };
   }
   return safe;
+}
+
+function buildWebhookPath(webhookKey) {
+  const key = typeof webhookKey === "string" ? webhookKey.trim() : "";
+  return key ? `/api/v1/webhooks/chartink?key=${key}` : "/api/v1/webhooks/chartink";
 }
 
 async function create(req, res) {
@@ -213,7 +233,7 @@ async function create(req, res) {
     ok: true,
     strategy: {
       ...sanitizeStrategy(strategy),
-      webhookPath: `/api/v1/webhooks/chartink?key=${webhookKey}`,
+      webhookPath: buildWebhookPath(webhookKey),
     },
   });
 }
@@ -225,10 +245,13 @@ async function list(req, res) {
   }
 
   const strategies = await listStrategies(userId);
-  const enriched = strategies.map((item) => ({
-    ...sanitizeStrategy(item),
-    webhookPath: `/api/v1/webhooks/chartink?key=${item.webhookKey}`,
-  }));
+  const source = Array.isArray(strategies) ? strategies : [];
+  const enriched = source
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      ...sanitizeStrategy(item),
+      webhookPath: buildWebhookPath(item.webhookKey),
+    }));
   sendJson(res, 200, { ok: true, strategies: enriched });
 }
 
@@ -305,9 +328,7 @@ async function update(req, res) {
     ok: true,
     strategy: {
       ...sanitizeStrategy(updated),
-      webhookPath: updated.webhookKey
-        ? `/api/v1/webhooks/chartink?key=${updated.webhookKey}`
-        : "/api/v1/webhooks/chartink",
+      webhookPath: buildWebhookPath(updated.webhookKey),
     },
   });
 }

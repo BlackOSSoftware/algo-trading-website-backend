@@ -12,6 +12,7 @@ const {
 const {
   sendTelegramText,
   getActiveSubscribers,
+
 } = require("../services/telegram.service");
 const { sendBroadcastEmail } = require("../services/email.service");
 const { getPollingStatus } = require("../services/telegramPolling.service");
@@ -473,17 +474,23 @@ function sanitizeStrategy(strategy) {
   return safe;
 }
 
+function buildWebhookPath(webhookKey) {
+  const key = typeof webhookKey === "string" ? webhookKey.trim() : "";
+  return key ? `/api/v1/webhooks/chartink?key=${key}` : "/api/v1/webhooks/chartink";
+}
+
 async function listStrategiesAdmin(req, res) {
   const userId = req.parsedUrl?.searchParams?.get("userId");
   const strategies = userId
     ? await findStrategiesByUser(userId)
     : await listAllStrategies();
-  const enriched = strategies.map((item) => ({
-    ...sanitizeStrategy(item),
-    webhookPath: item.webhookKey
-      ? `/api/v1/webhooks/chartink?key=${item.webhookKey}`
-      : "/api/v1/webhooks/chartink",
-  }));
+  const source = Array.isArray(strategies) ? strategies : [];
+  const enriched = source
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      ...sanitizeStrategy(item),
+      webhookPath: buildWebhookPath(item.webhookKey),
+    }));
   sendJson(res, 200, { ok: true, strategies: enriched });
 }
 
