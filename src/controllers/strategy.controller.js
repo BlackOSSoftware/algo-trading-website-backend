@@ -21,6 +21,36 @@ function normalizeString(value) {
   return String(value || "").trim();
 }
 
+function normalizeClearList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeString(item)).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => normalizeString(item)).filter(Boolean);
+      }
+    } catch {
+      // fall back to comma splitting
+    }
+    return trimmed
+      .split(",")
+      .map((item) => normalizeString(item))
+      .filter(Boolean);
+  }
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .filter(([, flag]) => Boolean(flag))
+      .map(([key]) => normalizeString(key))
+      .filter(Boolean);
+  }
+  return [];
+}
+
 function normalizeTime(value, label) {
   const raw = normalizeString(value);
   if (!raw) return "";
@@ -271,6 +301,9 @@ async function update(req, res) {
   const telegramEnabled = Boolean(body.telegramEnabled);
   const marketMaya = normalizeMarketMayaConfig(body.marketMaya);
   const marketMayaToken = normalizeString(body.marketMayaToken);
+  const marketMayaClear = normalizeClearList(
+    body.marketMayaClear ?? body.market_maya_clear ?? body.marketMaya_clear
+  );
 
   if (!strategyId) {
     throw createHttpError(400, "strategyId is required");
@@ -313,11 +346,28 @@ async function update(req, res) {
     patch["marketMaya.token"] = marketMayaToken;
   }
 
-  let updated = await updateStrategy(userId, strategyId, patch);
+  const unset = {};
+  if (marketMayaClear.length) {
+    const setKeys = new Set();
+    if (marketMaya) {
+      Object.keys(marketMaya).forEach((key) => setKeys.add(key));
+    }
+    if (marketMayaToken) {
+      setKeys.add("token");
+    }
+    marketMayaClear.forEach((key) => {
+      if (!key || key === "token" || setKeys.has(key)) return;
+      unset[`marketMaya.${key}`] = "";
+    });
+  }
+
+  const unsetPayload = Object.keys(unset).length ? unset : undefined;
+
+  let updated = await updateStrategy(userId, strategyId, patch, unsetPayload);
   if (!updated && webhookKey) {
     const byKey = await getStrategyByKey(webhookKey);
     if (byKey && byKey.userId?.toString && byKey.userId.toString() === String(userId)) {
-      updated = await updateStrategy(userId, byKey._id, patch);
+      updated = await updateStrategy(userId, byKey._id, patch, unsetPayload);
     }
   }
   if (!updated) {

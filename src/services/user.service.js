@@ -38,6 +38,7 @@ function isPlanActive(user) {
 
 async function ensureUserPlan(user) {
   if (!user) return null;
+  if (user.role === "admin") return user;
   if (user.planName && user.planExpiresAt) return user;
   const plan = buildPlan("free");
   return updateUserById(user._id, plan);
@@ -59,8 +60,22 @@ async function ensureAdminSeed() {
         role: "admin",
         planName: "enterprise",
         planExpiresAt: null,
+        emailVerified: true,
+        otpHash: null,
+        otpExpiresAt: null,
+        otpAttempts: 0,
       });
     }
+
+    if (existing.role === "admin" && !existing.emailVerified) {
+      return updateUserById(existing._id, {
+        emailVerified: true,
+        otpHash: null,
+        otpExpiresAt: null,
+        otpAttempts: 0,
+      });
+    }
+
     return existing;
   }
 
@@ -72,6 +87,7 @@ async function ensureAdminSeed() {
     role: "admin",
     planName: "enterprise",
     planExpiresAt: null,
+    emailVerified: true,
   });
 }
 

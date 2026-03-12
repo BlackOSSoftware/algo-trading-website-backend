@@ -271,11 +271,16 @@ function buildBaseParams({ strategy, payload }) {
     readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
     cfg.bufferValue ??
     legacyBufferValueRaw;
-  const bufferBy = normalizeBufferBy(bufferByRaw) || (bufferValueRaw !== undefined ? "point" : "");
+  const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
-  const bufferedPrice = applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy);
-  const effectivePrice = bufferedPrice ?? triggerPrice ?? limitPriceNumeric;
-  const priceForLimitOrder = bufferedPrice !== null ? formatNumber(bufferedPrice) : limitPrice;
+  const bufferedPrice = bufferBy
+    ? applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy)
+    : null;
+  const effectivePrice = bufferBy
+    ? bufferedPrice ?? triggerPrice ?? limitPriceNumeric
+    : triggerPrice ?? limitPriceNumeric;
+  const priceForLimitOrder =
+    bufferBy && bufferedPrice !== null ? formatNumber(bufferedPrice) : limitPrice;
 
   const qtyDistribution =
     normalizeString(readFirstPayloadValue(payload, ["qty_distribution", "qtyDistribution"])) ||

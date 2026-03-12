@@ -53,14 +53,19 @@ async function findStrategyByIdForUser(userId, strategyId) {
   return strategiesCollection().findOne({ $and: [userQuery, idQuery] });
 }
 
-async function updateStrategyByIdForUser(userId, strategyId, patch) {
+async function updateStrategyByIdForUser(userId, strategyId, patch, unset = null) {
   const userQuery = buildUserQuery(userId);
   const idQuery = buildStrategyIdQuery(strategyId);
   if (!userQuery || !idQuery) return null;
 
+  const update = { $set: patch };
+  if (unset && typeof unset === "object" && Object.keys(unset).length) {
+    update.$unset = unset;
+  }
+
   const result = await strategiesCollection().findOneAndUpdate(
     { $and: [userQuery, idQuery] },
-    { $set: patch },
+    update,
     { returnDocument: "after" }
   );
 

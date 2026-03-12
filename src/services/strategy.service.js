@@ -24,8 +24,8 @@ async function getStrategyByIdForUser(userId, strategyId) {
   return findStrategyByIdForUser(userId, strategyId);
 }
 
-async function updateStrategy(userId, strategyId, patch) {
-  return updateStrategyByIdForUser(userId, strategyId, patch);
+async function updateStrategy(userId, strategyId, patch, unset) {
+  return updateStrategyByIdForUser(userId, strategyId, patch, unset);
 }
 
 async function deleteStrategy(userId, strategyId) {
