@@ -1,6 +1,35 @@
 const DEFAULT_BASE_URL = "https://restapi.marketmaya.com";
 const DEFAULT_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const CALL_TYPE_MAP = {
+  buy: "BUY",
+  sell: "SELL",
+  "buy exit": "BUY EXIT",
+  "sell exit": "SELL EXIT",
+  "buy add": "BUY ADD",
+  "sell add": "SELL ADD",
+  "partial buy exit": "PARTIAL BUY EXIT",
+  "partial sell exit": "PARTIAL SELL EXIT",
+};
+const EXIT_CALL_TYPES = new Set([
+  "BUY EXIT",
+  "SELL EXIT",
+  "PARTIAL BUY EXIT",
+  "PARTIAL SELL EXIT",
+]);
+const EXIT_ONLY_PARAM_KEYS = [
+  "order_type",
+  "price",
+  "qty_distribution",
+  "qty_value",
+  "target_by",
+  "target",
+  "sl_by",
+  "sl",
+  "is_trail_sl",
+  "sl_move",
+  "profit_move",
+];
 
 function normalizeBaseUrl(value) {
   const trimmed = String(value || "").trim();
@@ -85,9 +114,22 @@ function isTruthy(value) {
 }
 
 function normalizeMode(value, map) {
-  const raw = String(value || "").trim();
+  const raw = String(value || "").trim().replace(/\s+/g, " ");
   if (!raw) return "";
   return map[raw.toLowerCase()] || "";
+}
+
+function normalizeCallType(value) {
+  return normalizeMode(value, CALL_TYPE_MAP);
+}
+
+function stripExitOnlyParams(params) {
+  if (!EXIT_CALL_TYPES.has(String(params?.call_type || "").trim().toUpperCase())) return params;
+  const sanitized = { ...(params || {}) };
+  EXIT_ONLY_PARAM_KEYS.forEach((key) => {
+    delete sanitized[key];
+  });
+  return sanitized;
 }
 
 function parsePositiveNumber(value) {
@@ -105,25 +147,27 @@ function formatNumber(value) {
 function normalizeAndValidateTradeParams(inputParams) {
   const params = { ...(inputParams || {}) };
 
-  const callTypeMode = normalizeMode(params.call_type, {
-    buy: "BUY",
-    sell: "SELL",
-  });
+  const callTypeMode = normalizeCallType(params.call_type);
   if (params.call_type !== undefined && !callTypeMode) {
-    return { ok: false, error: "Invalid call_type. Use BUY or SELL." };
+    return {
+      ok: false,
+      error:
+        "Invalid call_type. Use BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT.",
+    };
   }
   if (callTypeMode) params.call_type = callTypeMode;
+  const sanitizedParams = stripExitOnlyParams(params);
 
-  const orderTypeMode = normalizeMode(params.order_type, {
+  const orderTypeMode = normalizeMode(sanitizedParams.order_type, {
     market: "MARKET",
     limit: "LIMIT",
   });
-  if (params.order_type !== undefined && !orderTypeMode) {
+  if (sanitizedParams.order_type !== undefined && !orderTypeMode) {
     return { ok: false, error: "Invalid order_type. Use MARKET or LIMIT." };
   }
-  if (orderTypeMode) params.order_type = orderTypeMode;
+  if (orderTypeMode) sanitizedParams.order_type = orderTypeMode;
 
-  const qtyMode = normalizeMode(params.qty_distribution, {
+  const qtyMode = normalizeMode(sanitizedParams.qty_distribution, {
     fix: "Fix",
     fixed: "Fix",
     "capital(%)": "Capital(%)",
@@ -135,15 +179,15 @@ function normalizeAndValidateTradeParams(inputParams) {
     "capital risk": "Capital Risk(%)",
     capitalrisk: "Capital Risk(%)",
   });
-  if (params.qty_distribution !== undefined && !qtyMode) {
+  if (sanitizedParams.qty_distribution !== undefined && !qtyMode) {
     return {
       ok: false,
       error: "Invalid qty_distribution. Use Fix, Capital(%), or Capital Risk(%).",
     };
   }
-  if (qtyMode) params.qty_distribution = qtyMode;
+  if (qtyMode) sanitizedParams.qty_distribution = qtyMode;
 
-  const targetMode = normalizeMode(params.target_by, {
+  const targetMode = normalizeMode(sanitizedParams.target_by, {
     money: "Money",
     point: "Point",
     points: "Point",
@@ -151,15 +195,15 @@ function normalizeAndValidateTradeParams(inputParams) {
     percent: "Percentage",
     price: "Price",
   });
-  if (params.target_by !== undefined && !targetMode) {
+  if (sanitizedParams.target_by !== undefined && !targetMode) {
     return {
       ok: false,
       error: "Invalid target_by. Use Money, Point, Percentage, or Price.",
     };
   }
-  if (targetMode) params.target_by = targetMode;
+  if (targetMode) sanitizedParams.target_by = targetMode;
 
-  const slMode = normalizeMode(params.sl_by, {
+  const slMode = normalizeMode(sanitizedParams.sl_by, {
     money: "Money",
     point: "Point",
     points: "Point",
@@ -167,16 +211,16 @@ function normalizeAndValidateTradeParams(inputParams) {
     percent: "Percentage",
     price: "Price",
   });
-  if (params.sl_by !== undefined && !slMode) {
+  if (sanitizedParams.sl_by !== undefined && !slMode) {
     return {
       ok: false,
       error: "Invalid sl_by. Use Money, Point, Percentage, or Price.",
     };
   }
-  if (slMode) params.sl_by = slMode;
+  if (slMode) sanitizedParams.sl_by = slMode;
 
-  const hasTargetBy = Boolean(String(params.target_by || "").trim());
-  const hasTarget = Boolean(String(params.target || "").trim());
+  const hasTargetBy = Boolean(String(sanitizedParams.target_by || "").trim());
+  const hasTarget = Boolean(String(sanitizedParams.target || "").trim());
   if (hasTargetBy && !hasTarget) {
     return { ok: false, error: "target is required when target_by is set." };
   }
@@ -184,15 +228,15 @@ function normalizeAndValidateTradeParams(inputParams) {
     return { ok: false, error: "target_by is required when target is set." };
   }
   if (hasTarget) {
-    const targetValue = parsePositiveNumber(params.target);
+    const targetValue = parsePositiveNumber(sanitizedParams.target);
     if (!targetValue) {
       return { ok: false, error: "target must be a positive number." };
     }
-    params.target = formatNumber(targetValue);
+    sanitizedParams.target = formatNumber(targetValue);
   }
 
-  const hasSlBy = Boolean(String(params.sl_by || "").trim());
-  const hasSl = Boolean(String(params.sl || "").trim());
+  const hasSlBy = Boolean(String(sanitizedParams.sl_by || "").trim());
+  const hasSl = Boolean(String(sanitizedParams.sl || "").trim());
   if (hasSlBy && !hasSl) {
     return { ok: false, error: "sl is required when sl_by is set." };
   }
@@ -200,16 +244,16 @@ function normalizeAndValidateTradeParams(inputParams) {
     return { ok: false, error: "sl_by is required when sl is set." };
   }
   if (hasSl) {
-    const slValue = parsePositiveNumber(params.sl);
+    const slValue = parsePositiveNumber(sanitizedParams.sl);
     if (!slValue) {
       return { ok: false, error: "sl must be a positive number." };
     }
-    params.sl = formatNumber(slValue);
+    sanitizedParams.sl = formatNumber(slValue);
   }
 
-  if (params.qty_distribution !== undefined || params.qty_value !== undefined) {
-    const hasQtyDistribution = Boolean(String(params.qty_distribution || "").trim());
-    const hasQtyValue = Boolean(String(params.qty_value || "").trim());
+  if (sanitizedParams.qty_distribution !== undefined || sanitizedParams.qty_value !== undefined) {
+    const hasQtyDistribution = Boolean(String(sanitizedParams.qty_distribution || "").trim());
+    const hasQtyValue = Boolean(String(sanitizedParams.qty_value || "").trim());
     if (hasQtyDistribution && !hasQtyValue) {
       return { ok: false, error: "qty_value is required when qty_distribution is set." };
     }
@@ -217,31 +261,31 @@ function normalizeAndValidateTradeParams(inputParams) {
       return { ok: false, error: "qty_distribution is required when qty_value is set." };
     }
     if (hasQtyValue) {
-      const qtyValue = parsePositiveNumber(params.qty_value);
+      const qtyValue = parsePositiveNumber(sanitizedParams.qty_value);
       if (!qtyValue) {
         return { ok: false, error: "qty_value must be a positive number." };
       }
-      params.qty_value = formatNumber(qtyValue);
+      sanitizedParams.qty_value = formatNumber(qtyValue);
     }
   }
 
-  if (params.order_type === "LIMIT") {
-    const priceValue = parsePositiveNumber(params.price);
+  if (sanitizedParams.order_type === "LIMIT") {
+    const priceValue = parsePositiveNumber(sanitizedParams.price);
     if (!priceValue) {
       return { ok: false, error: "price is required and must be positive for LIMIT order." };
     }
-    params.price = formatNumber(priceValue);
+    sanitizedParams.price = formatNumber(priceValue);
   }
 
-  const trailEnabled = isTruthy(params.is_trail_sl);
+  const trailEnabled = isTruthy(sanitizedParams.is_trail_sl);
   if (!trailEnabled) {
-    delete params.is_trail_sl;
-    delete params.sl_move;
-    delete params.profit_move;
+    delete sanitizedParams.is_trail_sl;
+    delete sanitizedParams.sl_move;
+    delete sanitizedParams.profit_move;
   } else {
-    params.is_trail_sl = true;
-    const slMoveValue = parsePositiveNumber(params.sl_move);
-    const profitMoveValue = parsePositiveNumber(params.profit_move);
+    sanitizedParams.is_trail_sl = true;
+    const slMoveValue = parsePositiveNumber(sanitizedParams.sl_move);
+    const profitMoveValue = parsePositiveNumber(sanitizedParams.profit_move);
     if (!slMoveValue) {
       return { ok: false, error: "sl_move must be a positive number when trail SL is enabled." };
     }
@@ -251,11 +295,11 @@ function normalizeAndValidateTradeParams(inputParams) {
         error: "profit_move must be a positive number when trail SL is enabled.",
       };
     }
-    params.sl_move = formatNumber(slMoveValue);
-    params.profit_move = formatNumber(profitMoveValue);
+    sanitizedParams.sl_move = formatNumber(slMoveValue);
+    sanitizedParams.profit_move = formatNumber(profitMoveValue);
   }
 
-  return { ok: true, params };
+  return { ok: true, params: sanitizedParams };
 }
 
 function cleanParams(params) {

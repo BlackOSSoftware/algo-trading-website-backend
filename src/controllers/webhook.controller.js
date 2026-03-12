@@ -6,7 +6,11 @@ const {
   saveWebhookEvent,
   updateWebhookEvent,
 } = require("../services/webhook.service");
-const { insertWebhookEvent, findWebhookEventById } = require("../models/webhookEvent.model");
+const {
+  insertWebhookEvent,
+  findWebhookEventById,
+  findRecentEventByFingerprint,
+} = require("../models/webhookEvent.model");
 const { findPlanById } = require("../models/plan.model");
 const {
   findPlanRequestByOrderId,
@@ -70,6 +74,10 @@ async function collectRecipients(strategy, ownerPlanActive) {
   return recipients;
 }
 
+function isEmailAlertEnabled(strategy) {
+  return strategy?.emailEnabled !== false;
+}
+
 function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
   const mode = tradeResult.execute ? "LIVE" : "DRY-RUN";
   const lines = [`TRADE: ${strategyName}`, `Mode: ${mode}`];
@@ -124,6 +132,34 @@ function normalizeWebhookPayload(payload) {
   return payload;
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function getWebhookFingerprint(strategy, payload) {
+  const base = stableStringify({
+    provider: "chartink",
+    strategyId: strategy?._id?.toString ? strategy._id.toString() : String(strategy?._id || ""),
+    payload,
+  });
+  return crypto.createHash("sha256").update(base).digest("hex");
+}
+
+function getWebhookDedupeWindowMs() {
+  const raw = Number(process.env.WEBHOOK_DEDUPE_MS || 5000);
+  if (!Number.isFinite(raw) || raw <= 0) return 5000;
+  return Math.min(raw, 60000);
+}
+
 async function chartinkWebhook(req, res) {
   if (req.method !== "POST") {
     throw createHttpError(405, "Method Not Allowed");
@@ -150,6 +186,18 @@ async function chartinkWebhook(req, res) {
   const rawPayload = await parseBody(req);
   const payload = normalizeWebhookPayload(rawPayload);
   const receivedAt = new Date().toISOString();
+  const fingerprint = getWebhookFingerprint(strategy, payload);
+  const duplicateSince = new Date(Date.now() - getWebhookDedupeWindowMs()).toISOString();
+  const existing = await findRecentEventByFingerprint(strategy._id, fingerprint, duplicateSince);
+  if (existing?.id) {
+    sendJson(res, 200, {
+      ok: true,
+      duplicate: true,
+      id: existing.id,
+      receivedAt: existing.receivedAt || receivedAt,
+    });
+    return;
+  }
 
   const event = {
     id: crypto.randomUUID(),
@@ -158,6 +206,7 @@ async function chartinkWebhook(req, res) {
     userId: strategy.userId.toString(),
     strategyId: strategy._id.toString(),
     strategyName: strategy.name,
+    fingerprint,
     headers: sanitizeHeaders(req.headers),
     payload,
   };
@@ -181,7 +230,8 @@ async function chartinkWebhook(req, res) {
           provider: "chartink",
           receivedAt,
           email: {
-            enabled: Boolean(ownerEmail),
+            enabled: Boolean(ownerEmail) && isEmailAlertEnabled(strategy),
+            strategyEnabled: isEmailAlertEnabled(strategy),
             planActive: Boolean(ownerPlanActive),
           },
           telegram: {
@@ -194,7 +244,7 @@ async function chartinkWebhook(req, res) {
           },
         };
 
-        if (ownerEmail && ownerPlanActive) {
+        if (ownerEmail && ownerPlanActive && isEmailAlertEnabled(strategy)) {
           const alertName =
             payload?.alert_name || payload?.alertName || payload?.scan_name || "Signal";
           const scanName = payload?.scan_name || payload?.scanName || "Chartink";

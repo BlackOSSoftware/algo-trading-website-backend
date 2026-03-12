@@ -5,8 +5,64 @@ const {
   countTradesByStrategyInRange,
 } = require("../models/marketMayaTrade.model");
 
+const DEFAULT_TRADE_WINDOW_START = "09:15";
+const DEFAULT_TRADE_WINDOW_END = "15:30";
+const ALLOWED_CALL_TYPES = new Set([
+  "BUY",
+  "SELL",
+  "BUY EXIT",
+  "SELL EXIT",
+  "BUY ADD",
+  "SELL ADD",
+  "PARTIAL BUY EXIT",
+  "PARTIAL SELL EXIT",
+]);
+const EXIT_CALL_TYPES = new Set([
+  "BUY EXIT",
+  "SELL EXIT",
+  "PARTIAL BUY EXIT",
+  "PARTIAL SELL EXIT",
+]);
+const EXIT_ONLY_PARAM_KEYS = [
+  "order_type",
+  "price",
+  "qty_distribution",
+  "qty_value",
+  "target_by",
+  "target",
+  "sl_by",
+  "sl",
+  "is_trail_sl",
+  "sl_move",
+  "profit_move",
+];
+
 function normalizeString(value) {
   return String(value || "").trim();
+}
+
+function normalizeTradeWindowValue(value, fallback) {
+  const raw = normalizeString(value);
+  if (!raw) return fallback;
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+}
+
+function normalizeTradeAction(value) {
+  const raw = normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+  return ALLOWED_CALL_TYPES.has(raw) ? raw : "";
+}
+
+function isExitTradeAction(value) {
+  return EXIT_CALL_TYPES.has(normalizeTradeAction(value));
+}
+
+function stripExitOnlyParams(params) {
+  if (!isExitTradeAction(params?.call_type)) return params;
+  const sanitized = { ...(params || {}) };
+  EXIT_ONLY_PARAM_KEYS.forEach((key) => {
+    delete sanitized[key];
+  });
+  return sanitized;
 }
 
 function parseRatioMultiplier(value) {
@@ -69,9 +125,7 @@ function toUpper(value) {
 }
 
 function normalizeCallType(value) {
-  const side = toUpper(value);
-  if (side === "BUY" || side === "SELL") return side;
-  return "";
+  return normalizeTradeAction(value);
 }
 
 function splitSymbols(value) {
@@ -81,6 +135,18 @@ function splitSymbols(value) {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function uniquePreserveOrder(values) {
+  const output = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const key = normalizeString(value).toUpperCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    output.push(key);
+  }
+  return output;
 }
 
 function clampMaxSymbols(value) {
@@ -254,48 +320,62 @@ function buildBaseParams({ strategy, payload }) {
     normalizeCallType(
       readFirstPayloadValue(payload, [callTypeKey, "call_type", "callType", "action", "side"])
     ) || normalizeCallType(cfg.callTypeFallback);
+  const exitTrade = isExitTradeAction(callType);
 
-  const orderType =
-    toUpper(readFirstPayloadValue(payload, ["order_type", "orderType"])) ||
-    toUpper(cfg.orderType);
-  const limitPrice =
-    normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
-    normalizeString(cfg.limitPrice);
-  const limitPriceNumeric = normalizePositiveNumber(limitPrice);
+  const orderType = exitTrade
+    ? ""
+    : toUpper(readFirstPayloadValue(payload, ["order_type", "orderType"])) ||
+      toUpper(cfg.orderType);
+  const limitPriceRaw = exitTrade
+    ? ""
+    : normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
+      normalizeString(cfg.limitPrice);
+  const hasLimitPrice = Boolean(limitPriceRaw);
+  const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
   const triggerPrice = readTriggerPrice(payload);
-  const bufferByRaw =
-    readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
-  const legacyBufferValueRaw =
-    readFirstPayloadValue(payload, ["buffer_points", "bufferPoints"]) ?? cfg.bufferPoints;
-  const bufferValueRaw =
-    readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
-    cfg.bufferValue ??
-    legacyBufferValueRaw;
+  const bufferByRaw = exitTrade
+    ? ""
+    : readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
+  const legacyBufferValueRaw = exitTrade
+    ? undefined
+    : readFirstPayloadValue(payload, ["buffer_points", "bufferPoints"]) ?? cfg.bufferPoints;
+  const bufferValueRaw = exitTrade
+    ? undefined
+    : readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
+      cfg.bufferValue ??
+      legacyBufferValueRaw;
   const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
-  const bufferedPrice = bufferBy
+  const bufferActive = orderType === "LIMIT" && Boolean(bufferBy);
+  const bufferedPrice = bufferActive
     ? applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy)
     : null;
-  const effectivePrice = bufferBy
+  const effectivePrice = bufferActive
     ? bufferedPrice ?? triggerPrice ?? limitPriceNumeric
     : triggerPrice ?? limitPriceNumeric;
+  const limitFallbackPrice =
+    bufferActive && bufferedPrice !== null ? bufferedPrice : triggerPrice;
+  const limitPriceResolved = limitPriceNumeric ?? (!hasLimitPrice ? limitFallbackPrice : null);
   const priceForLimitOrder =
-    bufferBy && bufferedPrice !== null ? formatNumber(bufferedPrice) : limitPrice;
+    orderType === "LIMIT" && limitPriceResolved ? formatNumber(limitPriceResolved) : "";
 
-  const qtyDistribution =
-    normalizeString(readFirstPayloadValue(payload, ["qty_distribution", "qtyDistribution"])) ||
-    normalizeString(cfg.qtyDistribution);
-  const qtyValue =
-    normalizeString(readFirstPayloadValue(payload, ["qty_value", "qtyValue"])) ||
-    normalizeString(cfg.qtyValue);
+  const qtyDistribution = exitTrade
+    ? ""
+    : normalizeString(readFirstPayloadValue(payload, ["qty_distribution", "qtyDistribution"])) ||
+      normalizeString(cfg.qtyDistribution);
+  const qtyValue = exitTrade
+    ? ""
+    : normalizeString(readFirstPayloadValue(payload, ["qty_value", "qtyValue"])) ||
+      normalizeString(cfg.qtyValue);
   const qtyMode = normalizeQtyMode(qtyDistribution);
-  const capitalAmountRaw =
-    readFirstPayloadValue(payload, ["capital_amount", "capitalAmount"]) ?? cfg.capitalAmount;
+  const capitalAmountRaw = exitTrade
+    ? undefined
+    : readFirstPayloadValue(payload, ["capital_amount", "capitalAmount"]) ?? cfg.capitalAmount;
   const capitalAmount = normalizePositiveNumber(capitalAmountRaw);
   let resolvedQtyDistribution = qtyDistribution;
   let resolvedQtyValue = qtyValue;
   let buildError = "";
-  if (bufferBy) {
+  if (!exitTrade && bufferActive) {
     if (bufferValue === null) {
       buildError = "Trade buffer value must be zero or a positive number";
     } else if (!callType && bufferValue > 0) {
@@ -307,7 +387,7 @@ function buildBaseParams({ strategy, payload }) {
     }
   }
 
-  if (qtyMode === "capital") {
+  if (!exitTrade && qtyMode === "capital") {
     const qtyPercent = normalizePositiveNumber(qtyValue);
     const computedQty = computeCapitalQty({
       capitalAmount,
@@ -329,37 +409,48 @@ function buildBaseParams({ strategy, payload }) {
     }
   }
 
-  let targetBy =
-    normalizeString(readFirstPayloadValue(payload, ["target_by", "targetBy"])) ||
-    normalizeString(cfg.targetBy);
-  let target =
-    normalizeString(readFirstPayloadValue(payload, ["target"])) ||
-    normalizeString(cfg.target);
-  const slBy =
-    normalizeString(readFirstPayloadValue(payload, ["sl_by", "slBy"])) ||
-    normalizeString(cfg.slBy);
-  const sl =
-    normalizeString(readFirstPayloadValue(payload, ["sl"])) ||
-    normalizeString(cfg.sl);
+  let targetBy = "";
+  let target = "";
+  let slBy = "";
+  let sl = "";
+  let trailSl = false;
+  let slMove = "";
+  let profitMove = "";
 
-  if (targetBy && targetBy.toLowerCase() === "ratio") {
-    const computed = computeTargetFromRatio(sl, target);
-    if (computed) {
-      target = computed;
-      targetBy = slBy || "";
-    } else {
-      target = "";
-      targetBy = "";
+  if (!exitTrade) {
+    targetBy =
+      normalizeString(readFirstPayloadValue(payload, ["target_by", "targetBy"])) ||
+      normalizeString(cfg.targetBy);
+    target =
+      normalizeString(readFirstPayloadValue(payload, ["target"])) ||
+      normalizeString(cfg.target);
+    slBy =
+      normalizeString(readFirstPayloadValue(payload, ["sl_by", "slBy"])) ||
+      normalizeString(cfg.slBy);
+    sl =
+      normalizeString(readFirstPayloadValue(payload, ["sl"])) ||
+      normalizeString(cfg.sl);
+
+    if (targetBy && targetBy.toLowerCase() === "ratio") {
+      const computed = computeTargetFromRatio(sl, target);
+      if (computed) {
+        target = computed;
+        targetBy = slBy || "";
+      } else {
+        target = "";
+        targetBy = "";
+      }
     }
+
+    const trailSlRaw = readFirstPayloadValue(payload, ["is_trail_sl", "isTrailSl", "trailSl"]);
+    trailSl = trailSlRaw !== undefined ? isTruthy(trailSlRaw) : isTruthy(cfg.trailSl);
+    slMove =
+      normalizeString(readFirstPayloadValue(payload, ["sl_move", "slMove"])) ||
+      normalizeString(cfg.slMove);
+    profitMove =
+      normalizeString(readFirstPayloadValue(payload, ["profit_move", "profitMove"])) ||
+      normalizeString(cfg.profitMove);
   }
-  const trailSlRaw = readFirstPayloadValue(payload, ["is_trail_sl", "isTrailSl", "trailSl"]);
-  const trailSl = trailSlRaw !== undefined ? isTruthy(trailSlRaw) : isTruthy(cfg.trailSl);
-  const slMove =
-    normalizeString(readFirstPayloadValue(payload, ["sl_move", "slMove"])) ||
-    normalizeString(cfg.slMove);
-  const profitMove =
-    normalizeString(readFirstPayloadValue(payload, ["profit_move", "profitMove"])) ||
-    normalizeString(cfg.profitMove);
 
   return {
     cfg,
@@ -468,11 +559,11 @@ function extractSymbolsFromPayload(payload, cfg) {
 
   if (symbolMode === "payloadSymbol") {
     const raw = readFirstPayloadValue(payload, [symbolKey, "symbol", "Symbol"]);
-    return { symbolCode: "", symbols: splitSymbols(raw).map((s) => s.toUpperCase()) };
+    return { symbolCode: "", symbols: uniquePreserveOrder(splitSymbols(raw)) };
   }
 
   const stocksRaw = readFirstPayloadValue(payload, ["stocks", "Stocks"]);
-  const symbols = splitSymbols(stocksRaw).map((s) => s.toUpperCase());
+  const symbols = uniquePreserveOrder(splitSymbols(stocksRaw));
   if (symbolMode === "stocksAll") return { symbolCode: "", symbols };
   return { symbolCode: "", symbols: symbols.length > 0 ? [symbols[0]] : [] };
 }
@@ -483,6 +574,7 @@ function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
   let params = { ...base };
   params = applyPayloadMap(params, payload, cfg);
   params = applyDerivativeDefaults(params, payload, cfg);
+  params = stripExitOnlyParams(params);
 
   if (symbolCode) {
     params.symbol_code = symbolCode;
@@ -497,12 +589,14 @@ function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
 
 function validateMinimumParams(params) {
   const exchange = normalizeString(params.exchange);
-  const callType = normalizeString(params.call_type).toUpperCase();
+  const callType = normalizeTradeAction(params.call_type);
   const symbolCode = normalizeString(params.symbol_code);
   const symbol = normalizeString(params.symbol);
   if (!exchange) return "exchange is required";
   if (!callType) return "call_type is required";
-  if (callType !== "BUY" && callType !== "SELL") return "call_type must be BUY or SELL";
+  if (!ALLOWED_CALL_TYPES.has(callType)) {
+    return "call_type must be BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT";
+  }
   if (!symbolCode && !symbol) return "symbol or symbol_code is required";
   return null;
 }
@@ -523,8 +617,14 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
 
   const maxSymbols = clampMaxSymbols(cfg.maxSymbols);
   const dailyTradeLimit = normalizePositiveInt(cfg.dailyTradeLimit);
-  const tradeWindowStart = normalizeString(cfg.tradeWindowStart);
-  const tradeWindowEnd = normalizeString(cfg.tradeWindowEnd);
+  const tradeWindowStart = normalizeTradeWindowValue(
+    cfg.tradeWindowStart,
+    DEFAULT_TRADE_WINDOW_START
+  );
+  const tradeWindowEnd = normalizeTradeWindowValue(
+    cfg.tradeWindowEnd,
+    DEFAULT_TRADE_WINDOW_END
+  );
 
   if (tradeWindowStart || tradeWindowEnd) {
     const baseDate = receivedAt ? new Date(receivedAt) : new Date();

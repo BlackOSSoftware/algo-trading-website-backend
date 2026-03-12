@@ -5,6 +5,13 @@ function webhookEventsCollection() {
   return getDb().collection("webhook_events");
 }
 
+function buildStrategyQuery(strategyId) {
+  if (!strategyId) return null;
+  const raw = strategyId instanceof ObjectId ? strategyId.toString() : String(strategyId);
+  const id = ObjectId.isValid(raw) ? new ObjectId(raw) : null;
+  return id ? { $or: [{ strategyId: id }, { strategyId: raw }] } : { strategyId: raw };
+}
+
 async function findWebhookEventById(eventId) {
   if (!eventId) return null;
   return webhookEventsCollection().findOne({ id: String(eventId) });
@@ -29,6 +36,21 @@ async function updateWebhookEventById(eventId, patch) {
     { id: String(eventId) },
     { $set: patch }
   );
+}
+
+async function findRecentEventByFingerprint(strategyId, fingerprint, sinceIso) {
+  const strategyQuery = buildStrategyQuery(strategyId);
+  if (!strategyQuery || !fingerprint) return null;
+
+  const query = {
+    $and: [
+      strategyQuery,
+      { fingerprint: String(fingerprint) },
+      ...(sinceIso ? [{ receivedAt: { $gte: sinceIso } }] : []),
+    ],
+  };
+
+  return webhookEventsCollection().find(query).sort({ receivedAt: -1 }).limit(1).next();
 }
 
 async function findEventsByUser(userId, strategyId, limit = 50) {
@@ -77,6 +99,7 @@ module.exports = {
   findWebhookEventById,
   insertWebhookEvent,
   updateWebhookEventById,
+  findRecentEventByFingerprint,
   findEventsByUser,
   deleteEventsByUserAndStrategy,
 };

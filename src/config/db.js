@@ -24,6 +24,11 @@ async function connectMongo() {
     strategyId: 1,
     receivedAt: -1,
   });
+  await db.collection("webhook_events").createIndex({
+    strategyId: 1,
+    fingerprint: 1,
+    receivedAt: -1,
+  });
   await db.collection("strategies").createIndex({ userId: 1, createdAt: -1 });
   await db.collection("strategies").createIndex({ webhookKey: 1 }, { unique: true });
   await db.collection("marketmaya_trades").createIndex({ receivedAt: -1 });

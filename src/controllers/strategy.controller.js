@@ -11,6 +11,19 @@ const {
   deleteStrategy,
 } = require("../services/strategy.service");
 
+const DEFAULT_TRADE_WINDOW_START = "09:15";
+const DEFAULT_TRADE_WINDOW_END = "15:30";
+const ALLOWED_CALL_TYPE_FALLBACKS = new Set([
+  "BUY",
+  "SELL",
+  "BUY EXIT",
+  "SELL EXIT",
+  "BUY ADD",
+  "SELL ADD",
+  "PARTIAL BUY EXIT",
+  "PARTIAL SELL EXIT",
+]);
+
 function normalizeUrl(value) {
   const trimmed = (value || "").trim();
   if (!trimmed) return "";
@@ -19,6 +32,27 @@ function normalizeUrl(value) {
 
 function normalizeString(value) {
   return String(value || "").trim();
+}
+
+function normalizeBoolean(value, defaultValue = false) {
+  return value === undefined ? defaultValue : Boolean(value);
+}
+
+function normalizeStoredTime(value, fallback) {
+  const raw = normalizeString(value);
+  if (!raw) return fallback;
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+}
+
+function normalizeTradeAction(value) {
+  return normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+}
+
+function buildDefaultTradeWindowConfig() {
+  return {
+    tradeWindowStart: DEFAULT_TRADE_WINDOW_START,
+    tradeWindowEnd: DEFAULT_TRADE_WINDOW_END,
+  };
 }
 
 function normalizeClearList(value) {
@@ -87,9 +121,12 @@ function normalizeMarketMayaConfig(value) {
   const symbolMode = normalizeString(value.symbolMode) || "stocksFirst";
   const symbolKey = normalizeString(value.symbolKey) || "symbol";
   const callTypeKey = normalizeString(value.callTypeKey) || "call_type";
-  const callTypeFallback = normalizeString(value.callTypeFallback).toUpperCase();
-  if (callTypeFallback && callTypeFallback !== "BUY" && callTypeFallback !== "SELL") {
-    throw createHttpError(400, "marketMaya.callTypeFallback must be BUY or SELL");
+  const callTypeFallback = normalizeTradeAction(value.callTypeFallback);
+  if (callTypeFallback && !ALLOWED_CALL_TYPE_FALLBACKS.has(callTypeFallback)) {
+    throw createHttpError(
+      400,
+      "marketMaya.callTypeFallback must be BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT"
+    );
   }
   const orderType = normalizeString(value.orderType || value.order_type).toUpperCase();
   const limitPrice = normalizeString(value.limitPrice || value.limit_price);
@@ -121,7 +158,8 @@ function normalizeMarketMayaConfig(value) {
       value.tradeStartTime ??
       value.trade_start_time ??
       value.startTime ??
-      value.start_time,
+      value.start_time ??
+      DEFAULT_TRADE_WINDOW_START,
     "marketMaya.tradeWindowStart"
   );
   const tradeWindowEnd = normalizeTime(
@@ -132,7 +170,8 @@ function normalizeMarketMayaConfig(value) {
       value.tradeEndTime ??
       value.trade_end_time ??
       value.endTime ??
-      value.end_time,
+      value.end_time ??
+      DEFAULT_TRADE_WINDOW_END,
     "marketMaya.tradeWindowEnd"
   );
 
@@ -197,10 +236,16 @@ function normalizeMarketMayaConfig(value) {
 function sanitizeStrategy(strategy) {
   if (!strategy) return strategy;
   const safe = { ...strategy };
-  if (safe.marketMaya && typeof safe.marketMaya === "object") {
-    const { token, ...rest } = safe.marketMaya;
-    safe.marketMaya = { ...rest, tokenConfigured: Boolean(token) };
-  }
+  const marketMayaSource =
+    safe.marketMaya && typeof safe.marketMaya === "object" ? safe.marketMaya : {};
+  const { token, ...rest } = marketMayaSource;
+  safe.marketMaya = {
+    ...buildDefaultTradeWindowConfig(),
+    ...rest,
+    tradeWindowStart: normalizeStoredTime(rest.tradeWindowStart, DEFAULT_TRADE_WINDOW_START),
+    tradeWindowEnd: normalizeStoredTime(rest.tradeWindowEnd, DEFAULT_TRADE_WINDOW_END),
+    tokenConfigured: Boolean(token),
+  };
   return safe;
 }
 
@@ -220,8 +265,10 @@ async function create(req, res) {
   const webhookUrl = normalizeUrl(body.webhookUrl);
   const marketMayaUrl = normalizeUrl(body.marketMayaUrl);
   const enabled = Boolean(body.enabled);
+  const emailEnabled = normalizeBoolean(body.emailEnabled, true);
   const telegramEnabled = Boolean(body.telegramEnabled);
   const marketMaya = normalizeMarketMayaConfig(body.marketMaya);
+  const marketMayaConfig = marketMaya || buildDefaultTradeWindowConfig();
   const marketMayaTokenRaw = body.marketMayaToken;
   const marketMayaToken = normalizeString(marketMayaTokenRaw);
 
@@ -249,10 +296,11 @@ async function create(req, res) {
     marketMayaUrl: enabled ? marketMayaUrl : "",
     enabled,
     marketMaya: {
-      ...(marketMaya || {}),
+      ...marketMayaConfig,
       ...(marketMayaToken ? { token: marketMayaToken } : {}),
     },
     webhookKey,
+    emailEnabled,
     telegramEnabled,
     telegramChatId: "",
     createdAt: now,
@@ -300,6 +348,7 @@ async function update(req, res) {
   const enabled = Boolean(body.enabled);
   const telegramEnabled = Boolean(body.telegramEnabled);
   const marketMaya = normalizeMarketMayaConfig(body.marketMaya);
+  const marketMayaConfig = marketMaya || buildDefaultTradeWindowConfig();
   const marketMayaToken = normalizeString(body.marketMayaToken);
   const marketMayaClear = normalizeClearList(
     body.marketMayaClear ?? body.market_maya_clear ?? body.marketMaya_clear
@@ -317,10 +366,11 @@ async function update(req, res) {
   if (!existing) {
     throw createHttpError(404, "Strategy not found");
   }
+  const emailEnabled = normalizeBoolean(body.emailEnabled, existing.emailEnabled !== false);
 
   const tokenAfter =
     marketMayaToken ||
-    marketMaya?.token ||
+    marketMayaConfig?.token ||
     existing.marketMaya?.token ||
     process.env.MARKETMAYA_TOKEN;
   if (enabled && !tokenAfter) {
@@ -333,15 +383,14 @@ async function update(req, res) {
     name,
     marketMayaUrl: enabled ? marketMayaUrl : "",
     enabled,
+    emailEnabled,
     telegramEnabled,
     updatedAt: now,
   };
 
-  if (marketMaya) {
-    Object.entries(marketMaya).forEach(([key, value]) => {
-      patch[`marketMaya.${key}`] = value;
-    });
-  }
+  Object.entries(marketMayaConfig).forEach(([key, value]) => {
+    patch[`marketMaya.${key}`] = value;
+  });
   if (marketMayaToken) {
     patch["marketMaya.token"] = marketMayaToken;
   }
