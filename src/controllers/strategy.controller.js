@@ -28,6 +28,7 @@ const ALLOWED_MARKET_MAYA_SEGMENTS = new Set(["EQ", "FUT", "OPT"]);
 const ALLOWED_MARKET_MAYA_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
 const ALLOWED_MARKET_MAYA_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
 const ALLOWED_MARKET_MAYA_OPTION_TYPES = new Set(["CE", "PE"]);
+const ALLOWED_LIMIT_PRICE_SOURCES = new Set(["fixed", "trigger"]);
 
 function normalizeUrl(value) {
   const trimmed = (value || "").trim();
@@ -130,6 +131,17 @@ function parseJsonObject(value, label) {
   }
 }
 
+function normalizeLimitPriceSource(value, limitPrice) {
+  const raw = normalizeString(value).toLowerCase();
+  if (!raw) return limitPrice ? "fixed" : "";
+  if (raw === "manual" || raw === "limit") return "fixed";
+  if (raw === "chartink" || raw === "payload") return "trigger";
+  if (!ALLOWED_LIMIT_PRICE_SOURCES.has(raw)) {
+    throw createHttpError(400, "marketMaya.limitPriceSource must be fixed or trigger");
+  }
+  return raw;
+}
+
 function normalizeMarketMayaConfig(value) {
   if (!value || typeof value !== "object") return null;
 
@@ -158,6 +170,10 @@ function normalizeMarketMayaConfig(value) {
   }
   const orderType = normalizeString(value.orderType || value.order_type).toUpperCase();
   const limitPrice = normalizeString(value.limitPrice || value.limit_price);
+  const limitPriceSource = normalizeLimitPriceSource(
+    value.limitPriceSource ?? value.limit_price_source ?? value.priceSource ?? value.price_source,
+    limitPrice
+  );
   const bufferBy = normalizeString(value.bufferBy || value.buffer_by);
   const bufferValueRaw =
     value.bufferValue ??
@@ -233,6 +249,12 @@ function normalizeMarketMayaConfig(value) {
       throw createHttpError(400, "marketMaya.strikePrice must be a positive number");
     }
   }
+  if (orderType === "LIMIT" && limitPriceSource === "fixed" && !limitPrice) {
+    throw createHttpError(
+      400,
+      "marketMaya.limitPrice is required when marketMaya.limitPriceSource is fixed"
+    );
+  }
 
   const maxSymbolsRaw = value.maxSymbols;
   const maxSymbols = maxSymbolsRaw !== undefined ? Number(maxSymbolsRaw) : undefined;
@@ -272,6 +294,7 @@ function normalizeMarketMayaConfig(value) {
     ...derivativeConfig,
     ...optionConfig,
     ...(orderType ? { orderType } : {}),
+    ...(limitPriceSource ? { limitPriceSource } : {}),
     ...(limitPrice ? { limitPrice } : {}),
     ...(bufferBy ? { bufferBy } : {}),
     ...(Number.isFinite(bufferValue) && bufferValue >= 0 ? { bufferValue } : {}),

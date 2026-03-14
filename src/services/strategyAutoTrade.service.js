@@ -342,6 +342,15 @@ function normalizeQtyMode(value) {
   return raw;
 }
 
+function normalizeLimitPriceSource(value) {
+  const raw = normalizeString(value).toLowerCase();
+  if (!raw) return "";
+  if (raw === "manual" || raw === "limit") return "fixed";
+  if (raw === "chartink" || raw === "payload") return "trigger";
+  if (raw === "fixed" || raw === "trigger") return raw;
+  return "";
+}
+
 function readTriggerPrice(payload) {
   const raw = readFirstPayloadValue(payload, [
     "trigger_price",
@@ -450,36 +459,53 @@ function buildBaseParams({ strategy, payload }) {
     ? ""
     : toUpper(readFirstPayloadValue(payload, ["order_type", "orderType"])) ||
       toUpper(cfg.orderType);
-  const limitPriceRaw = exitTrade
+  const limitPriceSourceConfigured = exitTrade
+    ? ""
+    : normalizeLimitPriceSource(
+        readFirstPayloadValue(payload, ["limit_price_source", "limitPriceSource"]) ||
+          cfg.limitPriceSource
+      );
+  const limitPriceRawCandidate = exitTrade
     ? ""
     : normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
       normalizeString(cfg.limitPrice);
+  const limitPriceSource =
+    limitPriceSourceConfigured || (limitPriceRawCandidate ? "fixed" : "trigger");
+  const limitPriceRaw = limitPriceSource === "fixed" ? limitPriceRawCandidate : "";
   const hasLimitPrice = Boolean(limitPriceRaw);
   const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
   const triggerPrice = readTriggerPrice(payload);
-  const bufferByRaw = exitTrade
+  const bufferByRaw = exitTrade || limitPriceSource !== "trigger"
     ? ""
     : readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
-  const legacyBufferValueRaw = exitTrade
+  const legacyBufferValueRaw = exitTrade || limitPriceSource !== "trigger"
     ? undefined
     : readFirstPayloadValue(payload, ["buffer_points", "bufferPoints"]) ?? cfg.bufferPoints;
-  const bufferValueRaw = exitTrade
+  const bufferValueRaw = exitTrade || limitPriceSource !== "trigger"
     ? undefined
     : readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
       cfg.bufferValue ??
       legacyBufferValueRaw;
   const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
-  const bufferActive = orderType === "LIMIT" && Boolean(bufferBy);
+  const bufferActive =
+    orderType === "LIMIT" && limitPriceSource === "trigger" && Boolean(bufferBy);
   const bufferedPrice = bufferActive
     ? applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy)
     : null;
-  const effectivePrice = bufferActive
-    ? bufferedPrice ?? triggerPrice ?? limitPriceNumeric
-    : triggerPrice ?? limitPriceNumeric;
-  const limitFallbackPrice =
-    bufferActive && bufferedPrice !== null ? bufferedPrice : triggerPrice;
-  const limitPriceResolved = limitPriceNumeric ?? (!hasLimitPrice ? limitFallbackPrice : null);
+  const triggerBasedPrice = bufferActive ? bufferedPrice ?? triggerPrice : triggerPrice;
+  const effectivePrice =
+    orderType === "LIMIT"
+      ? limitPriceSource === "fixed"
+        ? limitPriceNumeric
+        : triggerBasedPrice ?? limitPriceNumeric
+      : triggerPrice ?? limitPriceNumeric;
+  const limitPriceResolved =
+    orderType === "LIMIT"
+      ? limitPriceSource === "fixed"
+        ? limitPriceNumeric
+        : triggerBasedPrice
+      : null;
   const priceForLimitOrder =
     orderType === "LIMIT" && limitPriceResolved ? formatNumber(limitPriceResolved) : "";
 
@@ -499,15 +525,21 @@ function buildBaseParams({ strategy, payload }) {
   let resolvedQtyDistribution = qtyDistribution;
   let resolvedQtyValue = qtyValue;
   let buildError = "";
-  if (!exitTrade && bufferActive) {
-    if (bufferValue === null) {
-      buildError = "Trade buffer value must be zero or a positive number";
-    } else if (!callType && bufferValue > 0) {
-      buildError = "call_type is required for trade buffer";
+  if (!exitTrade && orderType === "LIMIT") {
+    if (limitPriceSource === "fixed") {
+      if (!hasLimitPrice || limitPriceNumeric === null) {
+        buildError = "Limit price is required when fixed limit price is selected";
+      }
     } else if (!triggerPrice) {
-      buildError = "Trigger price is required for trade buffer";
-    } else if (bufferValue > 0 && bufferedPrice === null) {
-      buildError = "Trade buffer produced invalid price";
+      buildError = "Chartink trigger price is required when trigger price is selected";
+    } else if (bufferActive) {
+      if (bufferValue === null) {
+        buildError = "Trade buffer value must be zero or a positive number";
+      } else if (!callType && bufferValue > 0) {
+        buildError = "call_type is required for trade buffer";
+      } else if (bufferValue > 0 && bufferedPrice === null) {
+        buildError = "Trade buffer produced invalid price";
+      }
     }
   }
 
