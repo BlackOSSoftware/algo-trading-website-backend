@@ -306,6 +306,7 @@ function sanitizeStrategy(strategy) {
   safe.marketMaya = {
     ...buildDefaultTradeWindowConfig(),
     ...rest,
+    ...(token ? { token } : {}),
     tradeWindowStart: normalizeStoredTime(rest.tradeWindowStart, DEFAULT_TRADE_WINDOW_START),
     tradeWindowEnd: normalizeStoredTime(rest.tradeWindowEnd, DEFAULT_TRADE_WINDOW_END),
     tokenConfigured: Boolean(token),
