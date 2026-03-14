@@ -7,6 +7,11 @@ const {
 
 const DEFAULT_TRADE_WINDOW_START = "09:15";
 const DEFAULT_TRADE_WINDOW_END = "15:30";
+const TRADE_WINDOW_TIME_ZONE =
+  normalizeString(process.env.TRADE_WINDOW_TIME_ZONE || process.env.APP_TIME_ZONE) ||
+  "Asia/Kolkata";
+const TRADE_WINDOW_TIME_ZONE_LABEL =
+  TRADE_WINDOW_TIME_ZONE === "Asia/Kolkata" ? "IST" : TRADE_WINDOW_TIME_ZONE;
 const ALLOWED_CALL_TYPES = new Set([
   "BUY",
   "SELL",
@@ -36,6 +41,13 @@ const EXIT_ONLY_PARAM_KEYS = [
   "sl_move",
   "profit_move",
 ];
+const ALLOWED_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
+const ALLOWED_SEGMENTS = new Set(["EQ", "FUT", "OPT"]);
+const ALLOWED_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
+const ALLOWED_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
+const ALLOWED_OPTION_TYPES = new Set(["CE", "PE"]);
+const DERIVATIVE_EXCHANGES = new Set(["NFO", "BFO", "CDS", "MCX"]);
+const CASH_EXCHANGES = new Set(["NSE", "BSE"]);
 
 function normalizeString(value) {
   return String(value || "").trim();
@@ -163,6 +175,95 @@ function parseTimeToMinutes(value) {
   return Number(match[1]) * 60 + Number(match[2]);
 }
 
+function normalizeExpiryDateValue(value) {
+  const raw = normalizeString(value);
+  if (!raw) return "";
+  const direct = /^(\d{2})-(\d{2})-(\d{4})$/.exec(raw);
+  if (direct) return raw;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!iso) return "";
+  return `${iso[3]}-${iso[2]}-${iso[1]}`;
+}
+
+function isNumericString(value) {
+  return /^-?\d+(\.\d+)?$/.test(normalizeString(value));
+}
+
+function resolveDateInput(value) {
+  if (value instanceof Date && !Number.isNaN(value.valueOf())) return value;
+  const parsed = value ? new Date(value) : new Date();
+  return Number.isNaN(parsed.valueOf()) ? new Date() : parsed;
+}
+
+function getTimeZoneFormatter(timeZone) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+}
+
+function getTimeZoneParts(dateInput, timeZone = TRADE_WINDOW_TIME_ZONE) {
+  const date = resolveDateInput(dateInput);
+  const parts = getTimeZoneFormatter(timeZone).formatToParts(date);
+  const values = {};
+  parts.forEach((part) => {
+    if (part.type !== "literal") {
+      values[part.type] = Number(part.value);
+    }
+  });
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+    hour: values.hour,
+    minute: values.minute,
+    second: values.second,
+  };
+}
+
+function getTimeZoneOffsetMs(dateInput, timeZone = TRADE_WINDOW_TIME_ZONE) {
+  const date = resolveDateInput(dateInput);
+  const parts = getTimeZoneParts(date, timeZone);
+  const reconstructedUtc = Date.UTC(
+    parts.year,
+    (parts.month || 1) - 1,
+    parts.day || 1,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0
+  );
+  return reconstructedUtc - (date.getTime() - date.getMilliseconds());
+}
+
+function zonedDateTimeToUtc(parts, timeZone = TRADE_WINDOW_TIME_ZONE) {
+  const utcGuess = Date.UTC(
+    parts.year,
+    (parts.month || 1) - 1,
+    parts.day || 1,
+    parts.hour || 0,
+    parts.minute || 0,
+    parts.second || 0,
+    parts.millisecond || 0
+  );
+
+  // Re-run once with the first computed offset so the result stays correct even
+  // when the target timezone has DST transitions.
+  let offset = getTimeZoneOffsetMs(new Date(utcGuess), timeZone);
+  let resolved = utcGuess - offset;
+  const correctedOffset = getTimeZoneOffsetMs(new Date(resolved), timeZone);
+  if (correctedOffset !== offset) {
+    offset = correctedOffset;
+    resolved = utcGuess - offset;
+  }
+  return new Date(resolved);
+}
+
 function describeTradeWindow(startRaw, endRaw) {
   if (startRaw && endRaw) return `${startRaw}-${endRaw}`;
   if (startRaw) return `from ${startRaw}`;
@@ -175,7 +276,8 @@ function isWithinTradeWindow(now, startRaw, endRaw) {
   const end = parseTimeToMinutes(endRaw);
   if (start === null && end === null) return { allowed: true };
 
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const parts = getTimeZoneParts(now, TRADE_WINDOW_TIME_ZONE);
+  const nowMinutes = (parts.hour || 0) * 60 + (parts.minute || 0);
 
   let allowed = true;
   if (start !== null && end !== null) {
@@ -196,7 +298,9 @@ function isWithinTradeWindow(now, startRaw, endRaw) {
   const label = describeTradeWindow(startRaw, endRaw);
   return {
     allowed: false,
-    reason: label ? `Trade window closed (${label})` : "Trade window closed",
+    reason: label
+      ? `Trade window closed (${label}, ${TRADE_WINDOW_TIME_ZONE_LABEL})`
+      : `Trade window closed (${TRADE_WINDOW_TIME_ZONE_LABEL})`,
   };
 }
 
@@ -282,13 +386,33 @@ function computeCapitalQty({ capitalAmount, qtyPercent, stockPrice }) {
 }
 
 function getDayRangeIso(dateInput) {
-  const base = dateInput instanceof Date && !Number.isNaN(dateInput.valueOf())
-    ? dateInput
-    : new Date();
-  const start = new Date(base);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(base);
-  end.setHours(23, 59, 59, 999);
+  const base = resolveDateInput(dateInput);
+  const parts = getTimeZoneParts(base, TRADE_WINDOW_TIME_ZONE);
+  const start = zonedDateTimeToUtc(
+    {
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+      hour: 0,
+      minute: 0,
+      second: 0,
+      millisecond: 0,
+    },
+    TRADE_WINDOW_TIME_ZONE
+  );
+  const nextDayStart = zonedDateTimeToUtc(
+    {
+      year: parts.year,
+      month: parts.month,
+      day: (parts.day || 1) + 1,
+      hour: 0,
+      minute: 0,
+      second: 0,
+      millisecond: 0,
+    },
+    TRADE_WINDOW_TIME_ZONE
+  );
+  const end = new Date(nextDayStart.getTime() - 1);
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
@@ -499,8 +623,8 @@ function applyDerivativeDefaults(params, payload, cfg) {
   const merged = { ...params };
 
   const expiryDate =
-    normalizeString(readFirstPayloadValue(payload, ["expiry_date", "expiryDate"])) ||
-    normalizeString(cfg.expiryDate);
+    normalizeExpiryDateValue(readFirstPayloadValue(payload, ["expiry_date", "expiryDate"])) ||
+    normalizeExpiryDateValue(cfg.expiryDate);
 
   if (segment === "FUT" || segment === "OPT") {
     if (expiryDate) {
@@ -579,6 +703,13 @@ function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
   if (symbolCode) {
     params.symbol_code = symbolCode;
     delete params.symbol;
+    delete params.segment;
+    delete params.contract;
+    delete params.expiry;
+    delete params.expiry_date;
+    delete params.option_type;
+    delete params.atm;
+    delete params.strike_price;
   } else if (symbol) {
     params.symbol = String(symbol);
     delete params.symbol_code;
@@ -588,16 +719,99 @@ function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
 }
 
 function validateMinimumParams(params) {
-  const exchange = normalizeString(params.exchange);
+  const exchange = toUpper(params.exchange);
   const callType = normalizeTradeAction(params.call_type);
   const symbolCode = normalizeString(params.symbol_code);
   const symbol = normalizeString(params.symbol);
   if (!exchange) return "exchange is required";
+  if (!ALLOWED_EXCHANGES.has(exchange)) {
+    return "exchange must be NSE, BSE, NFO, BFO, CDS, or MCX";
+  }
+  params.exchange = exchange;
   if (!callType) return "call_type is required";
   if (!ALLOWED_CALL_TYPES.has(callType)) {
     return "call_type must be BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT";
   }
+  params.call_type = callType;
   if (!symbolCode && !symbol) return "symbol or symbol_code is required";
+  if (symbolCode) return null;
+
+  const segment = toUpper(params.segment) || "EQ";
+  if (!ALLOWED_SEGMENTS.has(segment)) {
+    return "segment must be EQ, FUT, or OPT";
+  }
+  params.segment = segment;
+
+  if (segment === "EQ" && !CASH_EXCHANGES.has(exchange)) {
+    return "EQ segment supports NSE or BSE exchange";
+  }
+  if ((segment === "FUT" || segment === "OPT") && !DERIVATIVE_EXCHANGES.has(exchange)) {
+    return "FUT and OPT segments support NFO, BFO, CDS, or MCX exchange";
+  }
+
+  if (segment === "FUT" || segment === "OPT") {
+    const rawExpiryDate = normalizeString(params.expiry_date);
+    const expiryDate = normalizeExpiryDateValue(rawExpiryDate);
+    if (rawExpiryDate && !expiryDate) {
+      return "expiry_date must be in dd-MM-yyyy format";
+    }
+    if (expiryDate) {
+      params.expiry_date = expiryDate;
+      delete params.contract;
+      delete params.expiry;
+    } else {
+      const contract = toUpper(params.contract);
+      const expiry = toUpper(params.expiry);
+      if (!contract || !ALLOWED_CONTRACTS.has(contract)) {
+        return "contract must be NEAR, NEXT, or FAR for derivative segments";
+      }
+      if (!expiry || !ALLOWED_EXPIRIES.has(expiry)) {
+        return "expiry must be WEEKLY or MONTHLY for derivative segments";
+      }
+      if (segment === "FUT" && expiry !== "MONTHLY") {
+        return "expiry must be MONTHLY for FUT segment";
+      }
+      params.contract = contract;
+      params.expiry = expiry;
+      delete params.expiry_date;
+    }
+  } else {
+    delete params.contract;
+    delete params.expiry;
+    delete params.expiry_date;
+  }
+
+  if (segment === "OPT") {
+    const optionType = toUpper(params.option_type);
+    if (!optionType || !ALLOWED_OPTION_TYPES.has(optionType)) {
+      return "option_type must be CE or PE for OPT segment";
+    }
+    params.option_type = optionType;
+
+    const strikePriceRaw = normalizeString(params.strike_price);
+    const atmRaw = normalizeString(params.atm);
+    if (strikePriceRaw) {
+      const strikePrice = normalizePositiveNumber(strikePriceRaw);
+      if (!strikePrice) {
+        return "strike_price must be a positive number";
+      }
+      params.strike_price = formatNumber(strikePrice);
+      delete params.atm;
+    } else if (atmRaw) {
+      if (!isNumericString(atmRaw)) {
+        return "atm must be a number like 0, 100, or -100";
+      }
+      params.atm = String(Number(atmRaw));
+      delete params.strike_price;
+    } else {
+      return "atm or strike_price is required for OPT segment";
+    }
+  } else {
+    delete params.option_type;
+    delete params.atm;
+    delete params.strike_price;
+  }
+
   return null;
 }
 

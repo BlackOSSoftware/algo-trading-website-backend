@@ -23,6 +23,11 @@ const ALLOWED_CALL_TYPE_FALLBACKS = new Set([
   "PARTIAL BUY EXIT",
   "PARTIAL SELL EXIT",
 ]);
+const ALLOWED_MARKET_MAYA_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
+const ALLOWED_MARKET_MAYA_SEGMENTS = new Set(["EQ", "FUT", "OPT"]);
+const ALLOWED_MARKET_MAYA_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
+const ALLOWED_MARKET_MAYA_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
+const ALLOWED_MARKET_MAYA_OPTION_TYPES = new Set(["CE", "PE"]);
 
 function normalizeUrl(value) {
   const trimmed = (value || "").trim();
@@ -46,6 +51,20 @@ function normalizeStoredTime(value, fallback) {
 
 function normalizeTradeAction(value) {
   return normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+}
+
+function normalizeExpiryDate(value, label) {
+  const raw = normalizeString(value);
+  if (!raw) return "";
+  const direct = /^(\d{2})-(\d{2})-(\d{4})$/.exec(raw);
+  if (direct) return raw;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (iso) return `${iso[3]}-${iso[2]}-${iso[1]}`;
+  throw createHttpError(400, `${label} must be in dd-MM-yyyy format`);
+}
+
+function isNumericText(value) {
+  return /^-?\d+(\.\d+)?$/.test(normalizeString(value));
 }
 
 function buildDefaultTradeWindowConfig() {
@@ -116,6 +135,15 @@ function normalizeMarketMayaConfig(value) {
 
   const exchange = normalizeString(value.exchange).toUpperCase();
   const segment = normalizeString(value.segment).toUpperCase();
+  if (exchange && !ALLOWED_MARKET_MAYA_EXCHANGES.has(exchange)) {
+    throw createHttpError(
+      400,
+      "marketMaya.exchange must be NSE, BSE, NFO, BFO, CDS, or MCX"
+    );
+  }
+  if (segment && !ALLOWED_MARKET_MAYA_SEGMENTS.has(segment)) {
+    throw createHttpError(400, "marketMaya.segment must be EQ, FUT, or OPT");
+  }
 
   const token = normalizeString(value.token);
   const symbolMode = normalizeString(value.symbolMode) || "stocksFirst";
@@ -176,11 +204,35 @@ function normalizeMarketMayaConfig(value) {
   );
 
   const contract = normalizeString(value.contract).toUpperCase();
+  if (contract && !ALLOWED_MARKET_MAYA_CONTRACTS.has(contract)) {
+    throw createHttpError(400, "marketMaya.contract must be NEAR, NEXT, or FAR");
+  }
   const expiry = normalizeString(value.expiry).toUpperCase();
-  const expiryDate = normalizeString(value.expiryDate || value.expiry_date);
+  if (expiry && !ALLOWED_MARKET_MAYA_EXPIRIES.has(expiry)) {
+    throw createHttpError(400, "marketMaya.expiry must be WEEKLY or MONTHLY");
+  }
+  if (segment === "FUT" && expiry && expiry !== "MONTHLY") {
+    throw createHttpError(400, "marketMaya.expiry must be MONTHLY for FUT segment");
+  }
+  const expiryDate = normalizeExpiryDate(
+    value.expiryDate || value.expiry_date,
+    "marketMaya.expiryDate"
+  );
   const optionType = normalizeString(value.optionType || value.option_type).toUpperCase();
+  if (optionType && !ALLOWED_MARKET_MAYA_OPTION_TYPES.has(optionType)) {
+    throw createHttpError(400, "marketMaya.optionType must be CE or PE");
+  }
   const atm = normalizeString(value.atm);
+  if (atm && !isNumericText(atm)) {
+    throw createHttpError(400, "marketMaya.atm must be a numeric value like 0, 100, or -100");
+  }
   const strikePrice = normalizeString(value.strikePrice || value.strike_price);
+  if (strikePrice) {
+    const strikeNumber = Number(strikePrice);
+    if (!Number.isFinite(strikeNumber) || strikeNumber <= 0) {
+      throw createHttpError(400, "marketMaya.strikePrice must be a positive number");
+    }
+  }
 
   const maxSymbolsRaw = value.maxSymbols;
   const maxSymbols = maxSymbolsRaw !== undefined ? Number(maxSymbolsRaw) : undefined;
@@ -192,6 +244,22 @@ function normalizeMarketMayaConfig(value) {
 
   const extraParams = parseJsonObject(value.extraParams, "marketMaya.extraParams");
   const payloadMap = parseJsonObject(value.payloadMap, "marketMaya.payloadMap");
+  const derivativeSegment = segment === "FUT" || segment === "OPT";
+  const optionSegment = segment === "OPT";
+  const derivativeConfig = derivativeSegment
+    ? expiryDate
+      ? { expiryDate }
+      : {
+          ...(contract ? { contract } : {}),
+          ...(expiry ? { expiry } : {}),
+        }
+    : {};
+  const optionConfig = optionSegment
+    ? {
+        ...(optionType ? { optionType } : {}),
+        ...(strikePrice ? { strikePrice } : atm ? { atm } : {}),
+      }
+    : {};
 
   return {
     ...(token ? { token } : {}),
@@ -201,12 +269,8 @@ function normalizeMarketMayaConfig(value) {
     symbolKey,
     callTypeKey,
     callTypeFallback,
-    ...(contract ? { contract } : {}),
-    ...(expiry ? { expiry } : {}),
-    ...(expiryDate ? { expiryDate } : {}),
-    ...(optionType ? { optionType } : {}),
-    ...(atm ? { atm } : {}),
-    ...(strikePrice ? { strikePrice } : {}),
+    ...derivativeConfig,
+    ...optionConfig,
     ...(orderType ? { orderType } : {}),
     ...(limitPrice ? { limitPrice } : {}),
     ...(bufferBy ? { bufferBy } : {}),
