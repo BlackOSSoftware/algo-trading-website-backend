@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const { parseBody } = require("../utils/body");
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
+const { normalizeClockTime } = require("../utils/clockTime");
 const {
   createStrategy,
   listStrategies,
@@ -45,9 +46,7 @@ function normalizeBoolean(value, defaultValue = false) {
 }
 
 function normalizeStoredTime(value, fallback) {
-  const raw = normalizeString(value);
-  if (!raw) return fallback;
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+  return normalizeClockTime(value, fallback);
 }
 
 function normalizeTradeAction(value) {
@@ -108,10 +107,11 @@ function normalizeClearList(value) {
 function normalizeTime(value, label) {
   const raw = normalizeString(value);
   if (!raw) return "";
-  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(raw)) {
+  const normalized = normalizeClockTime(raw);
+  if (!normalized) {
     throw createHttpError(400, `${label} must be in HH:mm (24h)`);
   }
-  return raw;
+  return normalized;
 }
 
 function parseJsonObject(value, label) {

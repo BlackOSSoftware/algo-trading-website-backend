@@ -1,6 +1,11 @@
 const crypto = require("crypto");
 const { customTrade, resolveToken } = require("./marketMaya.service");
 const {
+  parseClockTime,
+  normalizeClockTime,
+  parseClockTimeToMinutes,
+} = require("../utils/clockTime");
+const {
   insertMarketMayaTrade,
   countTradesByStrategyInRange,
 } = require("../models/marketMayaTrade.model");
@@ -54,9 +59,7 @@ function normalizeString(value) {
 }
 
 function normalizeTradeWindowValue(value, fallback) {
-  const raw = normalizeString(value);
-  if (!raw) return fallback;
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(raw) ? raw : fallback;
+  return normalizeClockTime(value, fallback);
 }
 
 function normalizeTradeAction(value) {
@@ -149,6 +152,67 @@ function splitSymbols(value) {
     .filter(Boolean);
 }
 
+function splitPayloadList(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeString(item)).filter(Boolean);
+  }
+  return splitSymbols(value);
+}
+
+function getTriggerPriceSymbolOrder(payload, cfg) {
+  const symbolMode = normalizeString(cfg?.symbolMode) || "stocksFirst";
+  const symbolKey = normalizeString(cfg?.symbolKey) || "symbol";
+  const rawSymbols =
+    symbolMode === "payloadSymbol"
+      ? readFirstPayloadValue(payload, [symbolKey, "symbol", "Symbol"])
+      : readFirstPayloadValue(payload, ["stocks", "Stocks"]);
+  return splitPayloadList(rawSymbols);
+}
+
+function resolveTriggerPrice(payload, cfg, symbol) {
+  const directPrice = normalizePositiveNumber(
+    readFirstPayloadValue(payload, [
+      "trigger_price",
+      "triggerPrice",
+      "entry_price",
+      "entryPrice",
+      "price",
+      "ltp",
+      "last_price",
+      "lastPrice",
+      "close",
+      "close_price",
+      "closePrice",
+    ])
+  );
+  if (directPrice) return directPrice;
+
+  const priceItems = splitPayloadList(
+    readFirstPayloadValue(payload, [
+      "trigger_prices",
+      "triggerPrices",
+      "entry_prices",
+      "entryPrices",
+      "prices",
+    ])
+  );
+  if (!priceItems.length) return null;
+
+  const parsedPrices = priceItems.map((item) => normalizePositiveNumber(item));
+  const targetSymbol = normalizeString(symbol).toUpperCase();
+  if (targetSymbol) {
+    const symbols = getTriggerPriceSymbolOrder(payload, cfg);
+    const symbolIndex = symbols.findIndex(
+      (item) => normalizeString(item).toUpperCase() === targetSymbol
+    );
+    if (symbolIndex >= 0 && parsedPrices[symbolIndex]) {
+      return parsedPrices[symbolIndex];
+    }
+  }
+
+  return parsedPrices.find((price) => price !== null) ?? null;
+}
+
 function uniquePreserveOrder(values) {
   const output = [];
   const seen = new Set();
@@ -168,11 +232,7 @@ function clampMaxSymbols(value) {
 }
 
 function parseTimeToMinutes(value) {
-  const raw = normalizeString(value);
-  if (!raw) return null;
-  const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(raw);
-  if (!match) return null;
-  return Number(match[1]) * 60 + Number(match[2]);
+  return parseClockTimeToMinutes(value);
 }
 
 function normalizeExpiryDateValue(value) {
@@ -271,6 +331,27 @@ function describeTradeWindow(startRaw, endRaw) {
   return "";
 }
 
+function resolveTradeWindowReferenceDate(receivedAt, payload) {
+  const baseDate = resolveDateInput(receivedAt);
+  const signalTimeRaw = readFirstPayloadValue(payload, ["triggered_at", "triggeredAt"]);
+  const signalTime = parseClockTime(signalTimeRaw);
+  if (!signalTime) return baseDate;
+
+  const baseParts = getTimeZoneParts(baseDate, TRADE_WINDOW_TIME_ZONE);
+  return zonedDateTimeToUtc(
+    {
+      year: baseParts.year,
+      month: baseParts.month,
+      day: baseParts.day,
+      hour: signalTime.hour,
+      minute: signalTime.minute,
+      second: signalTime.second || 0,
+      millisecond: 0,
+    },
+    TRADE_WINDOW_TIME_ZONE
+  );
+}
+
 function isWithinTradeWindow(now, startRaw, endRaw) {
   const start = parseTimeToMinutes(startRaw);
   const end = parseTimeToMinutes(endRaw);
@@ -351,23 +432,6 @@ function normalizeLimitPriceSource(value) {
   return "";
 }
 
-function readTriggerPrice(payload) {
-  const raw = readFirstPayloadValue(payload, [
-    "trigger_price",
-    "triggerPrice",
-    "entry_price",
-    "entryPrice",
-    "price",
-    "ltp",
-    "last_price",
-    "lastPrice",
-    "close",
-    "close_price",
-    "closePrice",
-  ]);
-  return normalizePositiveNumber(raw);
-}
-
 function applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy) {
   if (!Number.isFinite(triggerPrice) || triggerPrice <= 0) return null;
   if (!Number.isFinite(bufferValue) || bufferValue < 0) return null;
@@ -431,7 +495,7 @@ function getStrategyIds(strategy) {
   return { userId, strategyId };
 }
 
-function buildBaseParams({ strategy, payload }) {
+function buildBaseParams({ strategy, payload, symbol, symbolCode }) {
   const cfg = strategy?.marketMaya && typeof strategy.marketMaya === "object" ? strategy.marketMaya : {};
   const extraParams =
     cfg.extraParams && typeof cfg.extraParams === "object" && !Array.isArray(cfg.extraParams)
@@ -474,7 +538,7 @@ function buildBaseParams({ strategy, payload }) {
   const limitPriceRaw = limitPriceSource === "fixed" ? limitPriceRawCandidate : "";
   const hasLimitPrice = Boolean(limitPriceRaw);
   const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
-  const triggerPrice = readTriggerPrice(payload);
+  const triggerPrice = resolveTriggerPrice(payload, cfg, symbol || symbolCode || "");
   const bufferByRaw = exitTrade || limitPriceSource !== "trigger"
     ? ""
     : readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
@@ -725,7 +789,7 @@ function extractSymbolsFromPayload(payload, cfg) {
 }
 
 function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
-  const { cfg, base, buildError } = buildBaseParams({ strategy, payload });
+  const { cfg, base, buildError } = buildBaseParams({ strategy, payload, symbol, symbolCode });
 
   let params = { ...base };
   params = applyPayloadMap(params, payload, cfg);
@@ -871,10 +935,14 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     cfg.tradeWindowEnd,
     DEFAULT_TRADE_WINDOW_END
   );
+  const tradeWindowReferenceDate = resolveTradeWindowReferenceDate(receivedAt, payload);
 
   if (tradeWindowStart || tradeWindowEnd) {
-    const baseDate = receivedAt ? new Date(receivedAt) : new Date();
-    const windowCheck = isWithinTradeWindow(baseDate, tradeWindowStart, tradeWindowEnd);
+    const windowCheck = isWithinTradeWindow(
+      tradeWindowReferenceDate,
+      tradeWindowStart,
+      tradeWindowEnd
+    );
     if (!windowCheck.allowed) {
       return {
         ok: false,
@@ -892,8 +960,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
   const { userId, strategyId } = getStrategyIds(strategy);
   let remainingTrades = null;
   if (dailyTradeLimit && execute) {
-    const baseDate = receivedAt ? new Date(receivedAt) : new Date();
-    const { startIso, endIso } = getDayRangeIso(baseDate);
+    const { startIso, endIso } = getDayRangeIso(tradeWindowReferenceDate);
     const usedCount = await countTradesByStrategyInRange(strategyId, startIso, endIso, true);
     remainingTrades = Math.max(dailyTradeLimit - usedCount, 0);
     if (remainingTrades <= 0) {
