@@ -526,9 +526,39 @@ async function getSymbolPosition({ token, execute, baseUrl }) {
   return buildPreview({ path, token: resolvedToken, params: {}, baseUrl });
 }
 
+function summarizeTradeResultForTelegram(result, max = 180) {
+  if (!result) return "";
+
+  if (result.dryRun) {
+    try {
+      const params = result.request?.params || result.params || {};
+      const snippet = toSafeSnippet(JSON.stringify(params), max);
+      return snippet ? `Preview: ${snippet}` : "Preview ready";
+    } catch {
+      return "Preview ready";
+    }
+  }
+
+  if (!result.ok) {
+    return toSafeSnippet(result.error || "Market Maya request failed", max);
+  }
+
+  const responseMeta = result.result || {};
+  const summary = extractErrorMessage(responseMeta.payload, responseMeta);
+  const status =
+    Number.isFinite(Number(responseMeta.status)) && Number(responseMeta.status) > 0
+      ? `HTTP ${Number(responseMeta.status)}`
+      : "";
+
+  if (status && summary) return `${status}: ${summary}`;
+  if (summary) return summary;
+  return status || "Trade placed successfully";
+}
+
 module.exports = {
   resolveToken,
   customTrade,
   getCallHistory,
   getSymbolPosition,
+  summarizeTradeResultForTelegram,
 };

@@ -437,6 +437,9 @@ async function filterExitTargetsByOpenPositions({
 
 function getTriggerPriceSymbolOrder(payload, cfg) {
   const symbolMode = normalizeString(cfg?.symbolMode) || "stocksFirst";
+  if (symbolMode === "manualList") {
+    return resolveConfiguredSymbols(cfg?.symbols);
+  }
   const symbolKey = normalizeString(cfg?.symbolKey) || "symbol";
   const rawSymbols =
     symbolMode === "payloadSymbol"
@@ -499,6 +502,13 @@ function uniquePreserveOrder(values) {
     output.push(key);
   }
   return output;
+}
+
+function resolveConfiguredSymbols(value) {
+  if (Array.isArray(value)) {
+    return uniquePreserveOrder(value);
+  }
+  return uniquePreserveOrder(splitSymbols(value));
 }
 
 function clampMaxSymbols(value) {
@@ -1045,12 +1055,16 @@ function applyDerivativeDefaults(params, payload, cfg) {
 }
 
 function extractSymbolsFromPayload(payload, cfg) {
+  const symbolMode = normalizeString(cfg.symbolMode) || "stocksFirst";
+  if (symbolMode === "manualList") {
+    return { symbolCode: "", symbols: resolveConfiguredSymbols(cfg.symbols) };
+  }
+
   const symbolCode = normalizeString(readFirstPayloadValue(payload, ["symbol_code", "symbolCode"]));
   if (symbolCode) {
     return { symbolCode, symbols: [] };
   }
 
-  const symbolMode = normalizeString(cfg.symbolMode) || "stocksFirst";
   const symbolKey = normalizeString(cfg.symbolKey) || "symbol";
 
   if (symbolMode === "payloadSymbol") {
@@ -1201,7 +1215,14 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     };
   }
 
-  const maxSymbols = clampMaxSymbols(cfg.maxSymbols);
+  const symbolMode = normalizeString(cfg.symbolMode) || "stocksFirst";
+  const configuredSymbols = resolveConfiguredSymbols(cfg.symbols);
+  const hasCustomMaxSymbols = normalizeString(cfg.maxSymbols) !== "";
+  const maxSymbols = hasCustomMaxSymbols
+    ? clampMaxSymbols(cfg.maxSymbols)
+    : symbolMode === "manualList"
+      ? Math.max(1, Math.min(configuredSymbols.length || 1, 25))
+      : 5;
   const dailyTradeLimit = normalizePositiveInt(cfg.dailyTradeLimit);
   const tradeWindowStart = normalizeTradeWindowValue(
     cfg.tradeWindowStart,
@@ -1263,7 +1284,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
       ok: false,
       skipped: true,
       execute,
-      error: "No symbol found in webhook payload (symbol/symbol_code/stocks)",
+      error: "No symbol found in webhook payload or fixed stocks list (symbol/symbol_code/stocks)",
     };
   }
 

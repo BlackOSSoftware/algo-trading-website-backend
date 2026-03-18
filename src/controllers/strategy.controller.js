@@ -26,6 +26,12 @@ const ALLOWED_CALL_TYPE_FALLBACKS = new Set([
 ]);
 const ALLOWED_MARKET_MAYA_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
 const ALLOWED_MARKET_MAYA_SEGMENTS = new Set(["EQ", "FUT", "OPT"]);
+const ALLOWED_SYMBOL_MODES = new Set([
+  "stocksFirst",
+  "stocksAll",
+  "payloadSymbol",
+  "manualList",
+]);
 const ALLOWED_MARKET_MAYA_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
 const ALLOWED_MARKET_MAYA_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
 const ALLOWED_MARKET_MAYA_OPTION_TYPES = new Set(["CE", "PE"]);
@@ -104,6 +110,19 @@ function normalizeClearList(value) {
   return [];
 }
 
+function normalizeSymbolList(value) {
+  const rawValues = Array.isArray(value) ? value : normalizeString(value).split(",");
+  const seen = new Set();
+  const symbols = [];
+  for (const item of rawValues) {
+    const symbol = normalizeString(item).toUpperCase();
+    if (!symbol || seen.has(symbol)) continue;
+    seen.add(symbol);
+    symbols.push(symbol);
+  }
+  return symbols;
+}
+
 function normalizeTime(value, label) {
   const raw = normalizeString(value);
   if (!raw) return "";
@@ -159,7 +178,14 @@ function normalizeMarketMayaConfig(value) {
 
   const token = normalizeString(value.token);
   const symbolMode = normalizeString(value.symbolMode) || "stocksFirst";
+  if (!ALLOWED_SYMBOL_MODES.has(symbolMode)) {
+    throw createHttpError(
+      400,
+      "marketMaya.symbolMode must be stocksFirst, stocksAll, manualList, or payloadSymbol"
+    );
+  }
   const symbolKey = normalizeString(value.symbolKey) || "symbol";
+  const symbols = normalizeSymbolList(value.symbols ?? value.stockList ?? value.stock_list);
   const callTypeKey = normalizeString(value.callTypeKey) || "call_type";
   const callTypeFallback = normalizeTradeAction(value.callTypeFallback);
   if (callTypeFallback && !ALLOWED_CALL_TYPE_FALLBACKS.has(callTypeFallback)) {
@@ -255,6 +281,12 @@ function normalizeMarketMayaConfig(value) {
       "marketMaya.limitPrice is required when marketMaya.limitPriceSource is fixed"
     );
   }
+  if (symbolMode === "manualList" && symbols.length === 0) {
+    throw createHttpError(
+      400,
+      "marketMaya.symbols must include at least one stock when marketMaya.symbolMode is manualList"
+    );
+  }
 
   const maxSymbolsRaw = value.maxSymbols;
   const maxSymbols = maxSymbolsRaw !== undefined ? Number(maxSymbolsRaw) : undefined;
@@ -289,6 +321,7 @@ function normalizeMarketMayaConfig(value) {
     ...(segment ? { segment } : {}),
     symbolMode,
     symbolKey,
+    ...(symbols.length ? { symbols } : {}),
     callTypeKey,
     callTypeFallback,
     ...derivativeConfig,

@@ -25,6 +25,7 @@ const {
 } = require("../services/telegram.service");
 const { findUserById, isPlanActive } = require("../services/user.service");
 const { executeStrategyAutoTrades } = require("../services/strategyAutoTrade.service");
+const { summarizeTradeResultForTelegram } = require("../services/marketMaya.service");
 const { sendSignalEmail } = require("../services/email.service");
 
 function sanitizeHeaders(headers) {
@@ -113,6 +114,22 @@ function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
   if (tradeResult.failureCount > 0) {
     const firstError = (tradeResult.trades || []).find((t) => !t.ok)?.error;
     if (firstError) lines.push(`Error: ${firstError}`);
+  }
+
+  const responseLines = (tradeResult.trades || [])
+    .map((trade) => {
+      const summary = summarizeTradeResultForTelegram(trade);
+      if (!summary) return "";
+      const label = trade.symbol || trade.symbolCode || "Trade";
+      return `${label}: ${summary}`;
+    })
+    .filter(Boolean);
+  if (responseLines.length > 0) {
+    lines.push("Market Maya Response:");
+    responseLines.slice(0, 3).forEach((line) => lines.push(line));
+    if (responseLines.length > 3) {
+      lines.push(`+${responseLines.length - 3} more responses`);
+    }
   }
 
   lines.push(`Received: ${receivedAt}`);

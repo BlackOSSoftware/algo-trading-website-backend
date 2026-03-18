@@ -6,6 +6,7 @@ const {
   customTrade,
   getCallHistory,
   getSymbolPosition,
+  summarizeTradeResultForTelegram,
 } = require("../services/marketMaya.service");
 
 function normalizeString(value) {
@@ -65,6 +66,9 @@ function formatTradeNotification({ title, params, result }) {
     orderType ? `Order Type: ${orderType}${price ? ` @ ${price}` : ""}` : null,
     `Mode: ${mode}`,
     `Status: ${status}`,
+    summarizeTradeResultForTelegram(result)
+      ? `Market Maya Response: ${summarizeTradeResultForTelegram(result)}`
+      : null,
     !result?.ok && result?.error ? `Error: ${result.error}` : null,
     `Time: ${new Date().toISOString()}`,
   ]
