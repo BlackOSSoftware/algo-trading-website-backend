@@ -1322,6 +1322,8 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
         error,
         symbol: target.symbol || "",
         symbolCode: target.symbolCode || "",
+        orderType: params.order_type || null,
+        price: params.price || null,
         params,
       };
       trades.push(entry);
@@ -1347,6 +1349,8 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     trades.push({
       symbol: target.symbol || "",
       symbolCode: target.symbolCode || "",
+      orderType: params.order_type || null,
+      price: params.price || null,
       params,
       ...result,
     });

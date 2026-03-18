@@ -98,6 +98,17 @@ function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
     lines.push(`Symbols: ${shown}${unique.length > 10 ? ` +${unique.length - 10} more` : ""}`);
   }
 
+  const orderTypes = Array.from(
+    new Set(
+      (tradeResult.trades || [])
+        .map((t) => t.orderType || t.params?.order_type || t.request?.params?.order_type)
+        .filter(Boolean)
+    )
+  );
+  if (orderTypes.length > 0) {
+    lines.push(`Order Type: ${orderTypes.join(", ")}`);
+  }
+
   lines.push(`Result: ${tradeResult.successCount} ok / ${tradeResult.failureCount} failed`);
   if (tradeResult.failureCount > 0) {
     const firstError = (tradeResult.trades || []).find((t) => !t.ok)?.error;
@@ -434,6 +445,9 @@ async function signalWebhook(provider, req, res) {
               debug.marketMaya.trades = tradeResult.trades.map((trade) => ({
                 symbol: trade.symbol || "",
                 symbolCode: trade.symbolCode || "",
+                orderType:
+                  trade.orderType || trade.params?.order_type || trade.request?.params?.order_type || null,
+                price: trade.price || trade.params?.price || trade.request?.params?.price || null,
                 ok: Boolean(trade.ok),
                 dryRun: Boolean(trade.dryRun),
                 error: trade.error || null,
