@@ -1,4 +1,8 @@
-const { chartinkWebhook, razorpayWebhook } = require("../../controllers/webhook.controller");
+const {
+  chartinkWebhook,
+  tradingViewWebhook,
+  razorpayWebhook,
+} = require("../../controllers/webhook.controller");
 const {
   register,
   login,
@@ -23,6 +27,7 @@ const {
 const { list: listAlerts } = require("../../controllers/alerts.controller");
 const { webhook: telegramWebhook } = require("../../controllers/telegram.controller");
 const { createToken, listTokens } = require("../../controllers/telegramToken.controller");
+const { submitContactRequest } = require("../../controllers/contact.controller");
 const {
   list: listPlans,
   requestPlan,
@@ -55,7 +60,9 @@ const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 function registerV1Routes(router) {
   router.post("/api/v1/webhooks/chartink", chartinkWebhook);
+  router.post("/api/v1/webhooks/tradingview", tradingViewWebhook);
   router.post("/api/v1/webhook/razorpay", razorpayWebhook);
+  router.post("/api/v1/contact", submitContactRequest);
 
   router.post("/api/v1/auth/register", register);
   router.post("/api/v1/auth/login", login);

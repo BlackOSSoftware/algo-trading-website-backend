@@ -117,7 +117,7 @@ function summarizeSettled(results) {
   return { successCount, failureCount };
 }
 
-function normalizeWebhookPayload(payload) {
+function normalizeBaseWebhookPayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
 
   const directKeys = ["stocks", "symbol", "symbol_code", "alert_name", "scan_name"];
@@ -130,6 +130,131 @@ function normalizeWebhookPayload(payload) {
   }
 
   return payload;
+}
+
+function getProviderLabel(provider) {
+  return provider === "tradingview" ? "TradingView" : "Chartink";
+}
+
+function readNestedWebhookValue(payload, path) {
+  const parts = String(path || "")
+    .split(".")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  let current = payload;
+  for (const key of parts) {
+    if (!current || typeof current !== "object" || Array.isArray(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+  return current;
+}
+
+function readFirstWebhookValue(payload, keys) {
+  for (const key of keys || []) {
+    const value = readNestedWebhookValue(payload, key);
+    if (value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function normalizeSignalAction(value) {
+  const raw = String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+  if (!raw) return "";
+  const compact = raw.replace(/[_-]+/g, " ");
+  if (compact === "BUY" || compact === "LONG") return "BUY";
+  if (compact === "SELL" || compact === "SHORT") return "SELL";
+  if (compact === "BUY EXIT" || compact === "EXIT BUY" || compact === "LONG EXIT") return "BUY EXIT";
+  if (compact === "SELL EXIT" || compact === "EXIT SELL" || compact === "SHORT EXIT") return "SELL EXIT";
+  if (compact === "BUY ADD" || compact === "ADD BUY") return "BUY ADD";
+  if (compact === "SELL ADD" || compact === "ADD SELL") return "SELL ADD";
+  if (compact === "PARTIAL BUY EXIT" || compact === "BUY PARTIAL EXIT") return "PARTIAL BUY EXIT";
+  if (compact === "PARTIAL SELL EXIT" || compact === "SELL PARTIAL EXIT") return "PARTIAL SELL EXIT";
+  return "";
+}
+
+function normalizeTradingViewPayload(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+
+  const normalized = { ...payload };
+  const symbol = readFirstWebhookValue(normalized, [
+    "symbol",
+    "ticker",
+    "trading_symbol",
+    "tradingsymbol",
+    "stock",
+  ]);
+  if (symbol !== undefined) {
+    if (normalized.symbol === undefined) normalized.symbol = String(symbol).trim();
+    if (normalized.stocks === undefined) normalized.stocks = String(symbol).trim();
+  }
+
+  const triggerPrice = readFirstWebhookValue(normalized, [
+    "trigger_price",
+    "triggerPrice",
+    "price",
+    "close",
+    "last_price",
+    "lastPrice",
+  ]);
+  if (triggerPrice !== undefined && normalized.trigger_price === undefined) {
+    normalized.trigger_price = triggerPrice;
+  }
+
+  const signalAction = normalizeSignalAction(
+    readFirstWebhookValue(normalized, [
+      "call_type",
+      "callType",
+      "action",
+      "side",
+      "strategy.order.action",
+      "strategy.order.comment",
+    ])
+  );
+  if (signalAction && normalized.call_type === undefined) {
+    normalized.call_type = signalAction;
+  }
+
+  const alertName = readFirstWebhookValue(normalized, [
+    "alert_name",
+    "alertName",
+    "title",
+    "name",
+    "message",
+    "strategy.order.id",
+  ]);
+  if (alertName !== undefined && normalized.alert_name === undefined) {
+    normalized.alert_name = String(alertName).trim();
+  }
+
+  if (normalized.scan_name === undefined && normalized.scanName === undefined) {
+    normalized.scan_name = "TradingView";
+  }
+
+  const triggeredAt = readFirstWebhookValue(normalized, [
+    "triggered_at",
+    "triggeredAt",
+    "time",
+    "timestamp",
+    "bar_time",
+    "barTime",
+  ]);
+  if (triggeredAt !== undefined && normalized.triggered_at === undefined) {
+    normalized.triggered_at = triggeredAt;
+  }
+
+  return normalized;
+}
+
+function normalizeWebhookPayload(payload, provider = "chartink") {
+  const normalized = normalizeBaseWebhookPayload(payload);
+  if (provider === "tradingview") {
+    return normalizeTradingViewPayload(normalized);
+  }
+  return normalized;
 }
 
 function stableStringify(value) {
@@ -145,9 +270,9 @@ function stableStringify(value) {
   return JSON.stringify(value);
 }
 
-function getWebhookFingerprint(strategy, payload) {
+function getWebhookFingerprint(strategy, payload, provider) {
   const base = stableStringify({
-    provider: "chartink",
+    provider: provider || "chartink",
     strategyId: strategy?._id?.toString ? strategy._id.toString() : String(strategy?._id || ""),
     payload,
   });
@@ -160,12 +285,15 @@ function getWebhookDedupeWindowMs() {
   return Math.min(raw, 60000);
 }
 
-async function chartinkWebhook(req, res) {
+async function signalWebhook(provider, req, res) {
   if (req.method !== "POST") {
     throw createHttpError(405, "Method Not Allowed");
   }
 
-  const expectedToken = process.env.CHARTINK_WEBHOOK_TOKEN;
+  const expectedToken =
+    provider === "tradingview"
+      ? process.env.TRADINGVIEW_WEBHOOK_TOKEN || process.env.CHARTINK_WEBHOOK_TOKEN
+      : process.env.CHARTINK_WEBHOOK_TOKEN;
   if (expectedToken) {
     const providedToken = getToken(req);
     if (providedToken !== expectedToken) {
@@ -184,9 +312,9 @@ async function chartinkWebhook(req, res) {
   }
 
   const rawPayload = await parseBody(req);
-  const payload = normalizeWebhookPayload(rawPayload);
+  const payload = normalizeWebhookPayload(rawPayload, provider);
   const receivedAt = new Date().toISOString();
-  const fingerprint = getWebhookFingerprint(strategy, payload);
+  const fingerprint = getWebhookFingerprint(strategy, payload, provider);
   const duplicateSince = new Date(Date.now() - getWebhookDedupeWindowMs()).toISOString();
   const existing = await findRecentEventByFingerprint(strategy._id, fingerprint, duplicateSince);
   if (existing?.id) {
@@ -201,7 +329,7 @@ async function chartinkWebhook(req, res) {
 
   const event = {
     id: crypto.randomUUID(),
-    provider: "chartink",
+    provider,
     receivedAt,
     userId: strategy.userId.toString(),
     strategyId: strategy._id.toString(),
@@ -227,7 +355,7 @@ async function chartinkWebhook(req, res) {
         const recipients = await collectRecipients(strategy, ownerPlanActive);
         const ownerEmail = owner?.email ? String(owner.email) : "";
         const debug = {
-          provider: "chartink",
+          provider,
           receivedAt,
           email: {
             enabled: Boolean(ownerEmail) && isEmailAlertEnabled(strategy),
@@ -247,7 +375,7 @@ async function chartinkWebhook(req, res) {
         if (ownerEmail && ownerPlanActive && isEmailAlertEnabled(strategy)) {
           const alertName =
             payload?.alert_name || payload?.alertName || payload?.scan_name || "Signal";
-          const scanName = payload?.scan_name || payload?.scanName || "Chartink";
+          const scanName = payload?.scan_name || payload?.scanName || getProviderLabel(provider);
           const stocks = payload?.stocks || payload?.symbol || payload?.symbol_code || "-";
           try {
             await sendSignalEmail({
@@ -344,6 +472,14 @@ async function chartinkWebhook(req, res) {
         console.error("Webhook post-processing failed:", err);
       });
   });
+}
+
+async function chartinkWebhook(req, res) {
+  return signalWebhook("chartink", req, res);
+}
+
+async function tradingViewWebhook(req, res) {
+  return signalWebhook("tradingview", req, res);
 }
 
 function safeEqual(a, b) {
@@ -449,4 +585,4 @@ async function razorpayWebhook(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
-module.exports = { chartinkWebhook, razorpayWebhook };
+module.exports = { chartinkWebhook, tradingViewWebhook, razorpayWebhook };

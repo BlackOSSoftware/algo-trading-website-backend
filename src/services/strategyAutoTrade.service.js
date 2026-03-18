@@ -1,5 +1,5 @@
 const crypto = require("crypto");
-const { customTrade, resolveToken } = require("./marketMaya.service");
+const { customTrade, getSymbolPosition, resolveToken } = require("./marketMaya.service");
 const {
   parseClockTime,
   normalizeClockTime,
@@ -143,6 +143,15 @@ function normalizeCallType(value) {
   return normalizeTradeAction(value);
 }
 
+function resolveRequestedCallType(payload, cfg) {
+  const callTypeKey = normalizeString(cfg?.callTypeKey) || "call_type";
+  return (
+    normalizeCallType(
+      readFirstPayloadValue(payload, [callTypeKey, "call_type", "callType", "action", "side"])
+    ) || normalizeCallType(cfg?.callTypeFallback)
+  );
+}
+
 function splitSymbols(value) {
   const raw = normalizeString(value);
   if (!raw) return [];
@@ -157,6 +166,273 @@ function splitPayloadList(value) {
     return value.map((item) => normalizeString(item)).filter(Boolean);
   }
   return splitSymbols(value);
+}
+
+function normalizeLooseKey(value) {
+  return normalizeString(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function getLooseObjectValue(record, keys) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return undefined;
+  const candidates = new Set((keys || []).map((key) => normalizeLooseKey(key)).filter(Boolean));
+  if (candidates.size === 0) return undefined;
+
+  for (const [key, value] of Object.entries(record)) {
+    if (candidates.has(normalizeLooseKey(key))) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function parseSignedNumber(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const raw = normalizeString(value).replace(/,/g, "");
+  if (!raw) return null;
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed)) return parsed;
+  const match = raw.match(/-?\d+(\.\d+)?/);
+  if (!match) return null;
+  const fallback = Number(match[0]);
+  return Number.isFinite(fallback) ? fallback : null;
+}
+
+function normalizePositionSide(value) {
+  const raw = normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+  if (!raw) return "";
+  if (raw === "B" || raw === "BUY" || raw === "LONG") return "BUY";
+  if (raw === "S" || raw === "SELL" || raw === "SHORT") return "SELL";
+  if (raw.includes("BUY") || raw.includes("LONG")) return "BUY";
+  if (raw.includes("SELL") || raw.includes("SHORT")) return "SELL";
+  return "";
+}
+
+function getExitPositionSide(callType) {
+  const normalized = normalizeTradeAction(callType);
+  if (!normalized) return "";
+  if (normalized.includes("BUY")) return "BUY";
+  if (normalized.includes("SELL")) return "SELL";
+  return "";
+}
+
+function looksLikePositionRecord(record) {
+  return Boolean(
+    getLooseObjectValue(record, [
+      "symbol",
+      "trading_symbol",
+      "tradingsymbol",
+      "tsym",
+      "symbol_name",
+      "stock_name",
+      "stock",
+      "symbol_code",
+      "symbolcode",
+    ])
+  );
+}
+
+function findNestedObjectArray(value, visited = new Set()) {
+  if (!value || typeof value !== "object" || visited.has(value)) return [];
+  visited.add(value);
+
+  if (Array.isArray(value)) {
+    const records = value.filter(
+      (item) => item && typeof item === "object" && !Array.isArray(item)
+    );
+    if (records.length > 0) return records;
+    for (const item of value) {
+      const nested = findNestedObjectArray(item, visited);
+      if (nested.length > 0) return nested;
+    }
+    return [];
+  }
+
+  const preferredKeys = [
+    "positions",
+    "position",
+    "data",
+    "result",
+    "records",
+    "rows",
+    "items",
+    "list",
+    "response",
+    "payload",
+  ];
+  for (const key of preferredKeys) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    const nested = findNestedObjectArray(value[key], visited);
+    if (nested.length > 0) return nested;
+  }
+
+  for (const nestedValue of Object.values(value)) {
+    const nested = findNestedObjectArray(nestedValue, visited);
+    if (nested.length > 0) return nested;
+  }
+
+  return looksLikePositionRecord(value) ? [value] : [];
+}
+
+function extractPositionRecords(result) {
+  return findNestedObjectArray(result?.payload ?? result ?? null);
+}
+
+function extractPositionSymbolValues(record) {
+  const rawValues = [
+    getLooseObjectValue(record, ["symbol", "trading_symbol", "tradingsymbol", "tsym"]),
+    getLooseObjectValue(record, ["symbol_name", "stock_name", "stock"]),
+  ];
+
+  return uniquePreserveOrder(rawValues.flatMap((value) => splitPayloadList(value)));
+}
+
+function extractPositionSymbolCodeValues(record) {
+  const rawValues = [
+    getLooseObjectValue(record, [
+      "symbol_code",
+      "symbolcode",
+      "scrip_code",
+      "scripcode",
+      "exchange_token",
+      "exchangetoken",
+      "symbol_token",
+      "symboltoken",
+      "instrument_token",
+      "instrumenttoken",
+      "token",
+    ]),
+  ];
+
+  return uniquePreserveOrder(rawValues.flatMap((value) => splitPayloadList(value)));
+}
+
+function inferOpenPositionSide(record) {
+  const signedQty = parseSignedNumber(
+    getLooseObjectValue(record, [
+      "net_qty",
+      "netqty",
+      "net_quantity",
+      "netquantity",
+      "open_qty",
+      "openqty",
+      "open_quantity",
+      "openquantity",
+      "position_qty",
+      "positionqty",
+    ])
+  );
+  if (signedQty !== null) {
+    if (signedQty > 0) return "BUY";
+    if (signedQty < 0) return "SELL";
+    return "";
+  }
+
+  const buyQty = parseSignedNumber(
+    getLooseObjectValue(record, ["buy_qty", "buyqty", "buy_quantity", "buyquantity"])
+  );
+  const sellQty = parseSignedNumber(
+    getLooseObjectValue(record, ["sell_qty", "sellqty", "sell_quantity", "sellquantity"])
+  );
+  if (buyQty !== null || sellQty !== null) {
+    const delta = (buyQty || 0) - (sellQty || 0);
+    if (delta > 0) return "BUY";
+    if (delta < 0) return "SELL";
+    return "";
+  }
+
+  const explicitSide = normalizePositionSide(
+    getLooseObjectValue(record, [
+      "side",
+      "position_side",
+      "positionside",
+      "position",
+      "position_type",
+      "positiontype",
+      "trade_type",
+      "tradetype",
+      "transaction_type",
+      "transactiontype",
+      "call_type",
+      "calltype",
+    ])
+  );
+  if (!explicitSide) return "";
+
+  const qty = parseSignedNumber(getLooseObjectValue(record, ["qty", "quantity"]));
+  if (qty === 0) return "";
+  return explicitSide;
+}
+
+function targetMatchesPosition(record, target) {
+  const symbolCode = normalizeString(target?.symbolCode);
+  if (symbolCode) {
+    return extractPositionSymbolCodeValues(record).some(
+      (value) => normalizeString(value) === symbolCode
+    );
+  }
+
+  const symbol = normalizeString(target?.symbol).toUpperCase();
+  if (!symbol) return false;
+  return extractPositionSymbolValues(record).some(
+    (value) => normalizeString(value).toUpperCase() === symbol
+  );
+}
+
+function formatTargetLabel(target) {
+  return normalizeString(target?.symbol) || normalizeString(target?.symbolCode);
+}
+
+async function filterExitTargetsByOpenPositions({
+  targets,
+  callType,
+  token,
+  baseUrl,
+  execute,
+}) {
+  const exitSide = getExitPositionSide(callType);
+  if (!exitSide || !Array.isArray(targets) || targets.length === 0 || !execute) {
+    return { targets: Array.isArray(targets) ? targets : [], skippedTargets: [] };
+  }
+
+  const positionResult = await getSymbolPosition({
+    token,
+    execute: true,
+    baseUrl,
+  });
+  if (!positionResult?.ok) {
+    return {
+      targets,
+      skippedTargets: [],
+      lookupError: positionResult?.error || "Failed to fetch open positions",
+    };
+  }
+
+  const records = extractPositionRecords(positionResult.result);
+  if (records.length === 0) {
+    return {
+      targets: [],
+      skippedTargets: targets,
+      noMatchReason: `No open ${exitSide} positions found in Market Maya`,
+    };
+  }
+
+  const matchedTargets = targets.filter((target) =>
+    records.some(
+      (record) => targetMatchesPosition(record, target) && inferOpenPositionSide(record) === exitSide
+    )
+  );
+  const skippedTargets = targets.filter((target) => !matchedTargets.includes(target));
+
+  return {
+    targets: matchedTargets,
+    skippedTargets,
+    noMatchReason:
+      matchedTargets.length === 0
+        ? `No open ${exitSide} position found for incoming symbols`
+        : "",
+  };
 }
 
 function getTriggerPriceSymbolOrder(payload, cfg) {
@@ -979,7 +1255,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
 
   const { symbolCode, symbols } = extractSymbolsFromPayload(payload, cfg);
   const targets = symbolCode ? [{ symbolCode }] : symbols.slice(0, maxSymbols).map((s) => ({ symbol: s }));
-  const limitedTargets =
+  let limitedTargets =
     remainingTrades === null ? targets : targets.slice(0, Math.max(0, remainingTrades));
 
   if (limitedTargets.length === 0) {
@@ -989,6 +1265,40 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
       execute,
       error: "No symbol found in webhook payload (symbol/symbol_code/stocks)",
     };
+  }
+
+  const requestedCallType = resolveRequestedCallType(payload, cfg);
+  let exitFilterWarning = "";
+  if (isExitTradeAction(requestedCallType)) {
+    const exitFilter = await filterExitTargetsByOpenPositions({
+      targets: limitedTargets,
+      callType: requestedCallType,
+      token,
+      baseUrl,
+      execute,
+    });
+
+    if (exitFilter.lookupError) {
+      exitFilterWarning = exitFilter.lookupError;
+    } else {
+      limitedTargets = exitFilter.targets;
+      if (limitedTargets.length === 0) {
+        const skippedSymbols = exitFilter.skippedTargets
+          .map((target) => formatTargetLabel(target))
+          .filter(Boolean);
+        return {
+          ok: false,
+          skipped: true,
+          execute,
+          error: exitFilter.noMatchReason || "No matching open position found for exit signal",
+          total: 0,
+          successCount: 0,
+          failureCount: 0,
+          trades: [],
+          skippedSymbols,
+        };
+      }
+    }
   }
 
   const trades = [];
@@ -1068,6 +1378,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     total: trades.length,
     successCount,
     failureCount,
+    ...(exitFilterWarning ? { warning: exitFilterWarning } : {}),
     trades,
   };
 }
