@@ -58,6 +58,37 @@ function normalizeString(value) {
   return String(value || "").trim();
 }
 
+function normalizeSymbolMode(value, fallback = "") {
+  const compact = normalizeString(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!compact) return fallback;
+  if (compact === "stocksfirst" || compact === "firststock" || compact === "firststocks") {
+    return "stocksFirst";
+  }
+  if (compact === "stocksall" || compact === "allstocks") {
+    return "stocksAll";
+  }
+  if (
+    compact === "payloadsymbol" ||
+    compact === "payloadsymbols" ||
+    compact === "symbolfield" ||
+    compact === "customsymbol"
+  ) {
+    return "payloadSymbol";
+  }
+  if (
+    compact === "manuallist" ||
+    compact === "manualstocks" ||
+    compact === "manualstocklist" ||
+    compact === "fixedstocks" ||
+    compact === "fixedstockslist" ||
+    compact === "stocklist" ||
+    compact === "whitelist"
+  ) {
+    return "manualList";
+  }
+  return fallback;
+}
+
 function normalizeTradeWindowValue(value, fallback) {
   return normalizeClockTime(value, fallback);
 }
@@ -436,9 +467,9 @@ async function filterExitTargetsByOpenPositions({
 }
 
 function getTriggerPriceSymbolOrder(payload, cfg) {
-  const symbolMode = normalizeString(cfg?.symbolMode) || "stocksFirst";
+  const symbolMode = resolveSymbolMode(cfg);
   if (symbolMode === "manualList") {
-    return resolveConfiguredSymbols(cfg?.symbols);
+    return resolveConfiguredSymbolsFromConfig(cfg);
   }
   const symbolKey = normalizeString(cfg?.symbolKey) || "symbol";
   const rawSymbols =
@@ -509,6 +540,25 @@ function resolveConfiguredSymbols(value) {
     return uniquePreserveOrder(value);
   }
   return uniquePreserveOrder(splitSymbols(value));
+}
+
+function resolveConfiguredSymbolsFromConfig(cfg) {
+  return resolveConfiguredSymbols(
+    cfg?.symbols ??
+      cfg?.stockList ??
+      cfg?.stock_list ??
+      cfg?.fixedStocks ??
+      cfg?.fixed_stocks
+  );
+}
+
+function resolveSymbolMode(cfg) {
+  const configuredSymbols = resolveConfiguredSymbolsFromConfig(cfg);
+  return (
+    normalizeSymbolMode(
+      cfg?.symbolMode ?? cfg?.symbol_mode ?? cfg?.symbolSource ?? cfg?.symbol_source
+    ) || (configuredSymbols.length > 0 ? "manualList" : "stocksFirst")
+  );
 }
 
 function clampMaxSymbols(value) {
@@ -1055,9 +1105,9 @@ function applyDerivativeDefaults(params, payload, cfg) {
 }
 
 function extractSymbolsFromPayload(payload, cfg) {
-  const symbolMode = normalizeString(cfg.symbolMode) || "stocksFirst";
+  const symbolMode = resolveSymbolMode(cfg);
   if (symbolMode === "manualList") {
-    return { symbolCode: "", symbols: resolveConfiguredSymbols(cfg.symbols) };
+    return { symbolCode: "", symbols: resolveConfiguredSymbolsFromConfig(cfg) };
   }
 
   const symbolCode = normalizeString(readFirstPayloadValue(payload, ["symbol_code", "symbolCode"]));
@@ -1215,8 +1265,8 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     };
   }
 
-  const symbolMode = normalizeString(cfg.symbolMode) || "stocksFirst";
-  const configuredSymbols = resolveConfiguredSymbols(cfg.symbols);
+  const symbolMode = resolveSymbolMode(cfg);
+  const configuredSymbols = resolveConfiguredSymbolsFromConfig(cfg);
   const hasCustomMaxSymbols = normalizeString(cfg.maxSymbols) !== "";
   const maxSymbols = hasCustomMaxSymbols
     ? clampMaxSymbols(cfg.maxSymbols)

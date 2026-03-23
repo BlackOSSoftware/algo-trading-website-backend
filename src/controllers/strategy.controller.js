@@ -123,6 +123,37 @@ function normalizeSymbolList(value) {
   return symbols;
 }
 
+function normalizeSymbolMode(value, fallback = "") {
+  const compact = normalizeString(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!compact) return fallback;
+  if (compact === "stocksfirst" || compact === "firststock" || compact === "firststocks") {
+    return "stocksFirst";
+  }
+  if (compact === "stocksall" || compact === "allstocks") {
+    return "stocksAll";
+  }
+  if (
+    compact === "payloadsymbol" ||
+    compact === "payloadsymbols" ||
+    compact === "symbolfield" ||
+    compact === "customsymbol"
+  ) {
+    return "payloadSymbol";
+  }
+  if (
+    compact === "manuallist" ||
+    compact === "manualstocks" ||
+    compact === "manualstocklist" ||
+    compact === "fixedstocks" ||
+    compact === "fixedstockslist" ||
+    compact === "stocklist" ||
+    compact === "whitelist"
+  ) {
+    return "manualList";
+  }
+  return fallback;
+}
+
 function normalizeTime(value, label) {
   const raw = normalizeString(value);
   if (!raw) return "";
@@ -177,15 +208,25 @@ function normalizeMarketMayaConfig(value) {
   }
 
   const token = normalizeString(value.token);
-  const symbolMode = normalizeString(value.symbolMode) || "stocksFirst";
-  if (!ALLOWED_SYMBOL_MODES.has(symbolMode)) {
+  const symbols = normalizeSymbolList(
+    value.symbols ??
+      value.stockList ??
+      value.stock_list ??
+      value.fixedStocks ??
+      value.fixed_stocks
+  );
+  const resolvedSymbolMode =
+    normalizeSymbolMode(
+      value.symbolMode ?? value.symbol_mode ?? value.symbolSource ?? value.symbol_source
+    ) || (symbols.length > 0 ? "manualList" : "stocksFirst");
+  if (!ALLOWED_SYMBOL_MODES.has(resolvedSymbolMode)) {
     throw createHttpError(
       400,
       "marketMaya.symbolMode must be stocksFirst, stocksAll, manualList, or payloadSymbol"
     );
   }
+  const symbolMode = resolvedSymbolMode;
   const symbolKey = normalizeString(value.symbolKey) || "symbol";
-  const symbols = normalizeSymbolList(value.symbols ?? value.stockList ?? value.stock_list);
   const callTypeKey = normalizeString(value.callTypeKey) || "call_type";
   const callTypeFallback = normalizeTradeAction(value.callTypeFallback);
   if (callTypeFallback && !ALLOWED_CALL_TYPE_FALLBACKS.has(callTypeFallback)) {
