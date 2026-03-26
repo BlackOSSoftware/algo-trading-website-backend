@@ -62,7 +62,7 @@ function formatTradeNotification({ title, params, result }) {
 
   return [
     `${title}: ${callType || "TRADE"} ${symbol || symbolCode || ""}`.trim(),
-    exchange || segment ? `Market: ${[exchange, segment].filter(Boolean).join(" · ")}` : null,
+    exchange || segment ? `Market: ${[exchange, segment].filter(Boolean).join(" - ")}` : null,
     orderType ? `Order Type: ${orderType}${price ? ` @ ${price}` : ""}` : null,
     `Mode: ${mode}`,
     `Status: ${status}`,
@@ -76,14 +76,84 @@ function formatTradeNotification({ title, params, result }) {
     .join("\n");
 }
 
+function summarizeSettled(results) {
+  const items = Array.isArray(results) ? results : [];
+  const successCount = items.filter((item) => item.status === "fulfilled").length;
+  const failureCount = items.length - successCount;
+  return { successCount, failureCount };
+}
+
 async function notifyUserTrades(userId, text) {
-  if (!userId || !text) return;
-  const subscribers = await getActiveSubscribersForUser(String(userId));
-  if (!subscribers || subscribers.length === 0) return;
-  const tasks = subscribers
+  if (!userId) {
+    return {
+      attempted: false,
+      recipients: 0,
+      successCount: 0,
+      failureCount: 0,
+      skipped: true,
+      reason: "User not available",
+    };
+  }
+  if (!text) {
+    return {
+      attempted: false,
+      recipients: 0,
+      successCount: 0,
+      failureCount: 0,
+      skipped: true,
+      reason: "Notification text missing",
+    };
+  }
+
+  const recipients = (await getActiveSubscribersForUser(String(userId)))
     .filter((sub) => sub?.chatId)
-    .map((sub) => sendTelegramText(String(sub.chatId), text).catch(() => {}));
-  await Promise.allSettled(tasks);
+    .map((sub) => String(sub.chatId));
+
+  if (recipients.length === 0) {
+    return {
+      attempted: false,
+      recipients: 0,
+      successCount: 0,
+      failureCount: 0,
+      skipped: true,
+      reason: "No active Telegram subscribers",
+    };
+  }
+
+  const tasks = recipients.map((chatId) => sendTelegramText(chatId, text));
+  const results = await Promise.allSettled(tasks);
+  return {
+    attempted: true,
+    recipients: recipients.length,
+    ...summarizeSettled(results),
+  };
+}
+
+async function buildTradeTelegramResult({ userId, execute, result, title, params, skipReason }) {
+  if (!isTruthy(execute) || result?.dryRun) {
+    return {
+      attempted: false,
+      recipients: 0,
+      successCount: 0,
+      failureCount: 0,
+      skipped: true,
+      reason: skipReason || "Preview mode",
+    };
+  }
+
+  try {
+    const text = formatTradeNotification({ title, params, result });
+    return await notifyUserTrades(userId, text);
+  } catch (err) {
+    return {
+      attempted: true,
+      recipients: 0,
+      successCount: 0,
+      failureCount: 1,
+      skipped: false,
+      error: err instanceof Error ? err.message : "Telegram notification failed",
+    };
+  }
 }
 
 function readFirst(body, keys) {
@@ -325,18 +395,15 @@ async function trade(req, res) {
     throw createHttpError(400, result.error);
   }
 
-  sendJson(res, 200, result);
+  const telegram = await buildTradeTelegramResult({
+    userId,
+    execute,
+    result,
+    title: "MANUAL TRADE",
+    params,
+  });
 
-  if (isTruthy(execute) && !result.dryRun) {
-    setImmediate(() => {
-      const text = formatTradeNotification({
-        title: "MANUAL TRADE",
-        params,
-        result,
-      });
-      notifyUserTrades(userId, text).catch(() => {});
-    });
-  }
+  sendJson(res, 200, { ...result, telegram });
 }
 
 async function tradeAdmin(req, res) {
@@ -358,18 +425,16 @@ async function tradeAdmin(req, res) {
     throw createHttpError(400, result.error);
   }
 
-  sendJson(res, 200, result);
+  const telegram = await buildTradeTelegramResult({
+    userId: notifyUserId,
+    execute,
+    result,
+    title: "ADMIN TRADE",
+    params,
+    skipReason: notifyUserId ? "Preview mode" : "No Telegram user selected",
+  });
 
-  if (notifyUserId && isTruthy(execute) && !result.dryRun) {
-    setImmediate(() => {
-      const text = formatTradeNotification({
-        title: "ADMIN TRADE",
-        params,
-        result,
-      });
-      notifyUserTrades(notifyUserId, text).catch(() => {});
-    });
-  }
+  sendJson(res, 200, { ...result, telegram });
 }
 
 async function callHistory(req, res) {

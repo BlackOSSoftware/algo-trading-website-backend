@@ -17,6 +17,7 @@ const {
 const { sendBroadcastEmail } = require("../services/email.service");
 const { getPollingStatus } = require("../services/telegramPolling.service");
 const { updateUserById } = require("../models/user.model");
+const { deleteUserCascade } = require("../services/adminUserDelete.service");
 const {
   createPlan,
   listPlans,
@@ -70,6 +71,45 @@ async function updatePlan(req, res) {
 
   const user = await updateUserById(userId, planData);
   sendJson(res, 200, { ok: true, user });
+}
+
+async function deleteUser(req, res) {
+  const adminId = req.user?.sub;
+  const body = await parseBody(req);
+  const userId = String(body.userId || "").trim();
+
+  if (!userId) {
+    throw createHttpError(400, "userId is required");
+  }
+
+  if (userId === String(adminId || "")) {
+    throw createHttpError(400, "You cannot delete your own admin account");
+  }
+
+  const usersCollection = getDb().collection("users");
+  const targetUser = ObjectId.isValid(userId)
+    ? await usersCollection.findOne({ _id: new ObjectId(userId) })
+    : null;
+  if (!targetUser) {
+    throw createHttpError(404, "User not found");
+  }
+
+  if (String(targetUser.role || "").toLowerCase() === "admin") {
+    const remainingAdmins = await usersCollection.countDocuments({
+      role: "admin",
+      _id: { $ne: targetUser._id },
+    });
+    if (remainingAdmins < 1) {
+      throw createHttpError(400, "At least one admin account must remain");
+    }
+  }
+
+  const deleted = await deleteUserCascade(userId);
+  if (!deleted) {
+    throw createHttpError(404, "User not found");
+  }
+
+  sendJson(res, 200, { ok: true, deleted });
 }
 
 async function listTelegramSubscribers(req, res) {
@@ -626,6 +666,7 @@ async function getDashboardSummary(req, res) {
 module.exports = {
   listUsers,
   updatePlan,
+  deleteUser,
   listTelegramSubscribers,
   deactivateTelegramSubscriber,
   listTelegramTokens,

@@ -38,6 +38,7 @@ const {
 const {
   listUsers,
   updatePlan,
+  deleteUser,
   listTelegramSubscribers,
   deactivateTelegramSubscriber,
   listTelegramTokens,
@@ -93,6 +94,7 @@ function registerV1Routes(router) {
 
   router.get("/api/v1/admin/users", requireAdmin(listUsers));
   router.post("/api/v1/admin/users/plan", requireAdmin(updatePlan));
+  router.post("/api/v1/admin/users/delete", requireAdmin(deleteUser));
   router.get("/api/v1/admin/telegram/subscribers", requireAdmin(listTelegramSubscribers));
   router.post("/api/v1/admin/telegram/subscribers/deactivate", requireAdmin(deactivateTelegramSubscriber));
   router.get("/api/v1/admin/telegram/tokens", requireAdmin(listTelegramTokens));

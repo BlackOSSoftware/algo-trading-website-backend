@@ -30,6 +30,13 @@ const EXIT_ONLY_PARAM_KEYS = [
   "sl_move",
   "profit_move",
 ];
+const ALLOWED_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
+const ALLOWED_SEGMENTS = new Set(["EQ", "FUT", "OPT"]);
+const ALLOWED_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
+const ALLOWED_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
+const ALLOWED_OPTION_TYPES = new Set(["CE", "PE"]);
+const CASH_EXCHANGES = new Set(["NSE", "BSE"]);
+const DERIVATIVE_EXCHANGES = new Set(["NFO", "BFO", "CDS", "MCX"]);
 
 function normalizeBaseUrl(value) {
   const trimmed = String(value || "").trim();
@@ -140,6 +147,20 @@ function parsePositiveNumber(value) {
   return parsed;
 }
 
+function isNumericString(value) {
+  return /^-?\d+(\.\d+)?$/.test(String(value || "").trim());
+}
+
+function normalizeExpiryDateValue(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const direct = /^(\d{2})-(\d{2})-(\d{4})$/.exec(raw);
+  if (direct) return raw;
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!iso) return "";
+  return `${iso[3]}-${iso[2]}-${iso[1]}`;
+}
+
 function formatNumber(value) {
   return String(Number(value.toFixed(6)));
 }
@@ -157,15 +178,136 @@ function normalizeAndValidateTradeParams(inputParams) {
   }
   if (callTypeMode) params.call_type = callTypeMode;
   const sanitizedParams = stripExitOnlyParams(params);
+  const isExitTrade = EXIT_CALL_TYPES.has(callTypeMode);
 
-  const orderTypeMode = normalizeMode(sanitizedParams.order_type, {
-    market: "MARKET",
-    limit: "LIMIT",
-  });
-  if (sanitizedParams.order_type !== undefined && !orderTypeMode) {
-    return { ok: false, error: "Invalid order_type. Use MARKET or LIMIT." };
+  const exchange = String(sanitizedParams.exchange || "").trim().toUpperCase();
+  if (!exchange) {
+    return { ok: false, error: "exchange is required." };
   }
-  if (orderTypeMode) sanitizedParams.order_type = orderTypeMode;
+  if (!ALLOWED_EXCHANGES.has(exchange)) {
+    return { ok: false, error: "exchange must be NSE, BSE, NFO, BFO, CDS, or MCX." };
+  }
+  sanitizedParams.exchange = exchange;
+
+  const symbolCode = String(sanitizedParams.symbol_code || "").trim();
+  if (symbolCode) {
+    sanitizedParams.symbol_code = symbolCode;
+    delete sanitizedParams.segment;
+    delete sanitizedParams.symbol;
+    delete sanitizedParams.contract;
+    delete sanitizedParams.expiry;
+    delete sanitizedParams.expiry_date;
+    delete sanitizedParams.option_type;
+    delete sanitizedParams.atm;
+    delete sanitizedParams.strike_price;
+  } else {
+    const segment = String(sanitizedParams.segment || "").trim().toUpperCase();
+    if (!segment) {
+      return { ok: false, error: "segment is required when symbol_code is not provided." };
+    }
+    if (!ALLOWED_SEGMENTS.has(segment)) {
+      return { ok: false, error: "segment must be EQ, FUT, or OPT." };
+    }
+    sanitizedParams.segment = segment;
+
+    const symbol = String(sanitizedParams.symbol || "").trim().toUpperCase();
+    if (!symbol) {
+      return { ok: false, error: "symbol is required when symbol_code is not provided." };
+    }
+    sanitizedParams.symbol = symbol;
+
+    if (segment === "EQ" && !CASH_EXCHANGES.has(exchange)) {
+      return { ok: false, error: "EQ segment supports NSE or BSE exchange only." };
+    }
+    if ((segment === "FUT" || segment === "OPT") && !DERIVATIVE_EXCHANGES.has(exchange)) {
+      return {
+        ok: false,
+        error: "FUT and OPT segments support NFO, BFO, CDS, or MCX exchange only.",
+      };
+    }
+
+    if (segment === "FUT" || segment === "OPT") {
+      const expiryDate = normalizeExpiryDateValue(sanitizedParams.expiry_date);
+      if (String(sanitizedParams.expiry_date || "").trim() && !expiryDate) {
+        return { ok: false, error: "expiry_date must be in dd-MM-yyyy format." };
+      }
+      if (expiryDate) {
+        sanitizedParams.expiry_date = expiryDate;
+        delete sanitizedParams.contract;
+        delete sanitizedParams.expiry;
+      } else {
+        const contract = String(sanitizedParams.contract || "").trim().toUpperCase();
+        const expiry = String(sanitizedParams.expiry || "").trim().toUpperCase();
+        if (!contract || !ALLOWED_CONTRACTS.has(contract)) {
+          return {
+            ok: false,
+            error: "contract must be NEAR, NEXT, or FAR for derivative segments.",
+          };
+        }
+        if (!expiry || !ALLOWED_EXPIRIES.has(expiry)) {
+          return {
+            ok: false,
+            error: "expiry must be WEEKLY or MONTHLY for derivative segments.",
+          };
+        }
+        if (segment === "FUT" && expiry !== "MONTHLY") {
+          return { ok: false, error: "expiry must be MONTHLY for FUT segment." };
+        }
+        sanitizedParams.contract = contract;
+        sanitizedParams.expiry = expiry;
+        delete sanitizedParams.expiry_date;
+      }
+    } else {
+      delete sanitizedParams.contract;
+      delete sanitizedParams.expiry;
+      delete sanitizedParams.expiry_date;
+    }
+
+    if (segment === "OPT") {
+      const optionType = String(sanitizedParams.option_type || "").trim().toUpperCase();
+      if (!optionType || !ALLOWED_OPTION_TYPES.has(optionType)) {
+        return { ok: false, error: "option_type must be CE or PE for OPT segment." };
+      }
+      sanitizedParams.option_type = optionType;
+
+      const strikePriceRaw = String(sanitizedParams.strike_price || "").trim();
+      const atmRaw = String(sanitizedParams.atm || "").trim();
+      if (strikePriceRaw) {
+        const strikePrice = parsePositiveNumber(strikePriceRaw);
+        if (!strikePrice) {
+          return { ok: false, error: "strike_price must be a positive number." };
+        }
+        sanitizedParams.strike_price = formatNumber(strikePrice);
+        delete sanitizedParams.atm;
+      } else if (atmRaw) {
+        if (!isNumericString(atmRaw)) {
+          return { ok: false, error: "atm must be a number like 0, 100, or -100." };
+        }
+        sanitizedParams.atm = String(Number(atmRaw));
+        delete sanitizedParams.strike_price;
+      } else {
+        return { ok: false, error: "atm or strike_price is required for OPT segment." };
+      }
+    } else {
+      delete sanitizedParams.option_type;
+      delete sanitizedParams.atm;
+      delete sanitizedParams.strike_price;
+    }
+  }
+
+  if (!isExitTrade) {
+    const orderTypeMode = normalizeMode(sanitizedParams.order_type || "MARKET", {
+      market: "MARKET",
+      limit: "LIMIT",
+    });
+    if (!orderTypeMode) {
+      return { ok: false, error: "Invalid order_type. Use MARKET or LIMIT." };
+    }
+    sanitizedParams.order_type = orderTypeMode;
+  } else {
+    delete sanitizedParams.order_type;
+    delete sanitizedParams.price;
+  }
 
   const qtyMode = normalizeMode(sanitizedParams.qty_distribution, {
     fix: "Fix",
@@ -275,6 +417,8 @@ function normalizeAndValidateTradeParams(inputParams) {
       return { ok: false, error: "price is required and must be positive for LIMIT order." };
     }
     sanitizedParams.price = formatNumber(priceValue);
+  } else {
+    delete sanitizedParams.price;
   }
 
   const trailEnabled = isTruthy(sanitizedParams.is_trail_sl);
@@ -404,12 +548,22 @@ function extractErrorMessage(payload, meta = {}) {
   const contentType = meta.contentType || "";
   const headers = meta.headers || {};
   const status = meta.status;
+  const server = String(headers?.server || "").trim().toLowerCase();
 
   if (!payload) return "Market Maya request failed";
   if (isCloudflareChallenge(payload, contentType)) {
     const rayId = extractChallengeRayId(payload, headers);
     const suffix = rayId ? ` (CF-RAY: ${rayId})` : "";
     return `Market Maya request was blocked by Cloudflare challenge${suffix}. Retry shortly or whitelist server IP.`;
+  }
+  if (server === "cloudflare" && typeof payload === "string") {
+    const rayId = extractChallengeRayId(payload, headers);
+    const snippet = toSafeSnippet(payload);
+    const suffix = rayId ? ` (CF-RAY: ${rayId})` : "";
+    if (snippet) {
+      return `Cloudflare proxy error: ${snippet}${suffix}`;
+    }
+    return `Cloudflare proxy error${suffix}`;
   }
   if (looksLikeHtml(payload, contentType)) {
     return "Market Maya returned an HTML page instead of API response.";
