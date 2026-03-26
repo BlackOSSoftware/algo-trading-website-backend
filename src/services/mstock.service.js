@@ -310,6 +310,8 @@ function pickCandle(candles, candleOffset) {
 function getPriceField(source) {
   const normalized = normalizeString(source).toLowerCase();
   if (normalized === "mstocklow") return "low";
+  if (normalized === "mstockopen") return "open";
+  if (normalized === "mstockclose") return "close";
   return "high";
 }
 

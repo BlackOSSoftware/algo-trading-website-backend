@@ -35,7 +35,14 @@ const ALLOWED_SYMBOL_MODES = new Set([
 const ALLOWED_MARKET_MAYA_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
 const ALLOWED_MARKET_MAYA_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
 const ALLOWED_MARKET_MAYA_OPTION_TYPES = new Set(["CE", "PE"]);
-const ALLOWED_LIMIT_PRICE_SOURCES = new Set(["fixed", "trigger", "mstockHigh", "mstockLow"]);
+const ALLOWED_LIMIT_PRICE_SOURCES = new Set([
+  "fixed",
+  "trigger",
+  "mstockHigh",
+  "mstockLow",
+  "mstockOpen",
+  "mstockClose",
+]);
 const ALLOWED_MSTOCK_API_TYPES = new Set(["typeA", "typeB"]);
 const ALLOWED_MSTOCK_INTERVALS = new Set([
   "minute",
@@ -259,10 +266,16 @@ function normalizeLimitPriceSource(value, limitPrice) {
   if (raw === "mstocklow" || raw === "mstockcandlelow") {
     return "mstockLow";
   }
+  if (raw === "mstockopen" || raw === "mstockcandleopen") {
+    return "mstockOpen";
+  }
+  if (raw === "mstockclose" || raw === "mstockcandleclose") {
+    return "mstockClose";
+  }
   if (!ALLOWED_LIMIT_PRICE_SOURCES.has(raw)) {
     throw createHttpError(
       400,
-      "marketMaya.limitPriceSource must be fixed, trigger, mstockHigh, or mstockLow"
+      "marketMaya.limitPriceSource must be fixed, trigger, mstockHigh, mstockLow, mstockOpen, or mstockClose"
     );
   }
   return raw;
@@ -437,7 +450,12 @@ function normalizeMarketMayaConfig(value) {
       "marketMaya.limitPrice is required when marketMaya.limitPriceSource is fixed"
     );
   }
-  if (limitPriceSource === "mstockHigh" || limitPriceSource === "mstockLow") {
+  if (
+    limitPriceSource === "mstockHigh" ||
+    limitPriceSource === "mstockLow" ||
+    limitPriceSource === "mstockOpen" ||
+    limitPriceSource === "mstockClose"
+  ) {
     if (!mStockApiType || !ALLOWED_MSTOCK_API_TYPES.has(mStockApiType)) {
       throw createHttpError(400, "marketMaya.mStockApiType is required for mStock candle price");
     }

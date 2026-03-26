@@ -771,6 +771,12 @@ function normalizeLimitPriceSource(value) {
   if (raw === "mstocklow" || raw === "mstockcandlelow") {
     return "mstockLow";
   }
+  if (raw === "mstockopen" || raw === "mstockcandleopen") {
+    return "mstockOpen";
+  }
+  if (raw === "mstockclose" || raw === "mstockcandleclose") {
+    return "mstockClose";
+  }
   if (raw === "fixed" || raw === "trigger") return raw;
   return "";
 }
@@ -886,7 +892,12 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   let dynamicSourceLabel = "trigger price";
   let dynamicSourceError = "";
 
-  if (limitPriceSource === "mstockHigh" || limitPriceSource === "mstockLow") {
+  if (
+    limitPriceSource === "mstockHigh" ||
+    limitPriceSource === "mstockLow" ||
+    limitPriceSource === "mstockOpen" ||
+    limitPriceSource === "mstockClose"
+  ) {
     const mStockResult = await resolveMStockCandlePrice({
       config: cfg,
       source: limitPriceSource,
@@ -899,7 +910,13 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
     } else {
       dynamicSourcePrice = null;
       dynamicSourceLabel =
-        limitPriceSource === "mstockLow" ? "mStock candle low" : "mStock candle high";
+        limitPriceSource === "mstockLow"
+          ? "mStock candle low"
+          : limitPriceSource === "mstockOpen"
+            ? "mStock candle open"
+            : limitPriceSource === "mstockClose"
+              ? "mStock candle close"
+              : "mStock candle high";
       dynamicSourceError = mStockResult.error || `${dynamicSourceLabel} could not be fetched`;
     }
   }
