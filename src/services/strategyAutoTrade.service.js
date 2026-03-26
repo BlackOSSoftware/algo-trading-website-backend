@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { customTrade, getSymbolPosition, resolveToken } = require("./marketMaya.service");
+const { resolveMStockCandlePrice } = require("./mstock.service");
 const {
   parseClockTime,
   normalizeClockTime,
@@ -764,6 +765,12 @@ function normalizeLimitPriceSource(value) {
   if (!raw) return "";
   if (raw === "manual" || raw === "limit") return "fixed";
   if (raw === "chartink" || raw === "payload") return "trigger";
+  if (raw === "mstock" || raw === "mstockhigh" || raw === "mstockcandlehigh") {
+    return "mstockHigh";
+  }
+  if (raw === "mstocklow" || raw === "mstockcandlelow") {
+    return "mstockLow";
+  }
   if (raw === "fixed" || raw === "trigger") return raw;
   return "";
 }
@@ -831,7 +838,7 @@ function getStrategyIds(strategy) {
   return { userId, strategyId };
 }
 
-function buildBaseParams({ strategy, payload, symbol, symbolCode }) {
+async function buildBaseParams({ strategy, payload, symbol, symbolCode, receivedAt }) {
   const cfg = strategy?.marketMaya && typeof strategy.marketMaya === "object" ? strategy.marketMaya : {};
   const extraParams =
     cfg.extraParams && typeof cfg.extraParams === "object" && !Array.isArray(cfg.extraParams)
@@ -874,14 +881,36 @@ function buildBaseParams({ strategy, payload, symbol, symbolCode }) {
   const limitPriceRaw = limitPriceSource === "fixed" ? limitPriceRawCandidate : "";
   const hasLimitPrice = Boolean(limitPriceRaw);
   const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
-  const triggerPrice = resolveTriggerPrice(payload, cfg, symbol || symbolCode || "");
-  const bufferByRaw = exitTrade || limitPriceSource !== "trigger"
+  const payloadTriggerPrice = resolveTriggerPrice(payload, cfg, symbol || symbolCode || "");
+  let dynamicSourcePrice = payloadTriggerPrice;
+  let dynamicSourceLabel = "trigger price";
+  let dynamicSourceError = "";
+
+  if (limitPriceSource === "mstockHigh" || limitPriceSource === "mstockLow") {
+    const mStockResult = await resolveMStockCandlePrice({
+      config: cfg,
+      source: limitPriceSource,
+      receivedAt,
+    });
+
+    if (mStockResult.ok) {
+      dynamicSourcePrice = Number(mStockResult.price);
+      dynamicSourceLabel = `mStock candle ${mStockResult.priceField}`;
+    } else {
+      dynamicSourcePrice = null;
+      dynamicSourceLabel =
+        limitPriceSource === "mstockLow" ? "mStock candle low" : "mStock candle high";
+      dynamicSourceError = mStockResult.error || `${dynamicSourceLabel} could not be fetched`;
+    }
+  }
+
+  const bufferByRaw = exitTrade || limitPriceSource === "fixed"
     ? ""
     : readFirstPayloadValue(payload, ["buffer_by", "bufferBy"]) || cfg.bufferBy;
-  const legacyBufferValueRaw = exitTrade || limitPriceSource !== "trigger"
+  const legacyBufferValueRaw = exitTrade || limitPriceSource === "fixed"
     ? undefined
     : readFirstPayloadValue(payload, ["buffer_points", "bufferPoints"]) ?? cfg.bufferPoints;
-  const bufferValueRaw = exitTrade || limitPriceSource !== "trigger"
+  const bufferValueRaw = exitTrade || limitPriceSource === "fixed"
     ? undefined
     : readFirstPayloadValue(payload, ["buffer_value", "bufferValue"]) ??
       cfg.bufferValue ??
@@ -889,17 +918,17 @@ function buildBaseParams({ strategy, payload, symbol, symbolCode }) {
   const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
   const bufferActive =
-    orderType === "LIMIT" && limitPriceSource === "trigger" && Boolean(bufferBy);
+    orderType === "LIMIT" && limitPriceSource !== "fixed" && Boolean(bufferBy);
   const bufferedPrice = bufferActive
-    ? applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy)
+    ? applyBufferToPrice(dynamicSourcePrice, bufferValue, callType, bufferBy)
     : null;
-  const triggerBasedPrice = bufferActive ? bufferedPrice ?? triggerPrice : triggerPrice;
+  const triggerBasedPrice = bufferActive ? bufferedPrice ?? dynamicSourcePrice : dynamicSourcePrice;
   const effectivePrice =
     orderType === "LIMIT"
       ? limitPriceSource === "fixed"
         ? limitPriceNumeric
         : triggerBasedPrice ?? limitPriceNumeric
-      : triggerPrice ?? limitPriceNumeric;
+      : payloadTriggerPrice ?? limitPriceNumeric;
   const limitPriceResolved =
     orderType === "LIMIT"
       ? limitPriceSource === "fixed"
@@ -930,8 +959,10 @@ function buildBaseParams({ strategy, payload, symbol, symbolCode }) {
       if (!hasLimitPrice || limitPriceNumeric === null) {
         buildError = "Limit price is required when fixed limit price is selected";
       }
-    } else if (!triggerPrice) {
-      buildError = "Chartink trigger price is required when trigger price is selected";
+    } else if (!dynamicSourcePrice) {
+      buildError =
+        dynamicSourceError ||
+        `${dynamicSourceLabel.charAt(0).toUpperCase()}${dynamicSourceLabel.slice(1)} is required when selected`;
     } else if (bufferActive) {
       if (bufferValue === null) {
         buildError = "Trade buffer value must be zero or a positive number";
@@ -1128,8 +1159,14 @@ function extractSymbolsFromPayload(payload, cfg) {
   return { symbolCode: "", symbols: symbols.length > 0 ? [symbols[0]] : [] };
 }
 
-function buildTradeParams({ strategy, payload, symbol, symbolCode }) {
-  const { cfg, base, buildError } = buildBaseParams({ strategy, payload, symbol, symbolCode });
+async function buildTradeParams({ strategy, payload, symbol, symbolCode, receivedAt }) {
+  const { cfg, base, buildError } = await buildBaseParams({
+    strategy,
+    payload,
+    symbol,
+    symbolCode,
+    receivedAt,
+  });
 
   let params = { ...base };
   params = applyPayloadMap(params, payload, cfg);
@@ -1376,11 +1413,12 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
   const now = new Date().toISOString();
 
   for (const target of limitedTargets) {
-    const built = buildTradeParams({
+    const built = await buildTradeParams({
       strategy,
       payload,
       symbol: target.symbol,
       symbolCode: target.symbolCode,
+      receivedAt,
     });
     const params = built.params;
 

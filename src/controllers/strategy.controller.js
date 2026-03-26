@@ -35,7 +35,18 @@ const ALLOWED_SYMBOL_MODES = new Set([
 const ALLOWED_MARKET_MAYA_CONTRACTS = new Set(["NEAR", "NEXT", "FAR"]);
 const ALLOWED_MARKET_MAYA_EXPIRIES = new Set(["WEEKLY", "MONTHLY"]);
 const ALLOWED_MARKET_MAYA_OPTION_TYPES = new Set(["CE", "PE"]);
-const ALLOWED_LIMIT_PRICE_SOURCES = new Set(["fixed", "trigger"]);
+const ALLOWED_LIMIT_PRICE_SOURCES = new Set(["fixed", "trigger", "mstockHigh", "mstockLow"]);
+const ALLOWED_MSTOCK_API_TYPES = new Set(["typeA", "typeB"]);
+const ALLOWED_MSTOCK_INTERVALS = new Set([
+  "minute",
+  "3minute",
+  "5minute",
+  "10minute",
+  "15minute",
+  "30minute",
+  "60minute",
+  "day",
+]);
 
 function normalizeUrl(value) {
   const trimmed = (value || "").trim();
@@ -71,6 +82,62 @@ function normalizeExpiryDate(value, label) {
 
 function isNumericText(value) {
   return /^-?\d+(\.\d+)?$/.test(normalizeString(value));
+}
+
+function normalizePositiveInt(value) {
+  const numeric = value === undefined || value === null || value === "" ? NaN : Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
+  return Math.floor(numeric);
+}
+
+function normalizeMStockApiType(value) {
+  const compact = normalizeString(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!compact || compact === "typea" || compact === "a") return compact ? "typeA" : "";
+  if (compact === "typeb" || compact === "b") return "typeB";
+  throw createHttpError(400, "marketMaya.mStockApiType must be Type A or Type B");
+}
+
+function normalizeMStockInterval(value) {
+  const compact = normalizeString(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!compact) return "";
+  if (
+    compact === "minute" ||
+    compact === "1minute" ||
+    compact === "1m" ||
+    compact === "oneminute"
+  ) {
+    return "minute";
+  }
+  if (compact === "3minute" || compact === "3m" || compact === "threeminute") {
+    return "3minute";
+  }
+  if (compact === "5minute" || compact === "5m" || compact === "fiveminute") {
+    return "5minute";
+  }
+  if (compact === "10minute" || compact === "10m" || compact === "tenminute") {
+    return "10minute";
+  }
+  if (compact === "15minute" || compact === "15m" || compact === "fifteenminute") {
+    return "15minute";
+  }
+  if (compact === "30minute" || compact === "30m" || compact === "thirtyminute") {
+    return "30minute";
+  }
+  if (
+    compact === "60minute" ||
+    compact === "60m" ||
+    compact === "1hour" ||
+    compact === "onehour"
+  ) {
+    return "60minute";
+  }
+  if (compact === "day" || compact === "1day" || compact === "oneday") {
+    return "day";
+  }
+  throw createHttpError(
+    400,
+    "marketMaya.mStockInterval must be minute, 3minute, 5minute, 10minute, 15minute, 30minute, 60minute, or day"
+  );
 }
 
 function buildDefaultTradeWindowConfig() {
@@ -186,8 +253,17 @@ function normalizeLimitPriceSource(value, limitPrice) {
   if (!raw) return limitPrice ? "fixed" : "";
   if (raw === "manual" || raw === "limit") return "fixed";
   if (raw === "chartink" || raw === "payload") return "trigger";
+  if (raw === "mstock" || raw === "mstockhigh" || raw === "mstockcandlehigh") {
+    return "mstockHigh";
+  }
+  if (raw === "mstocklow" || raw === "mstockcandlelow") {
+    return "mstockLow";
+  }
   if (!ALLOWED_LIMIT_PRICE_SOURCES.has(raw)) {
-    throw createHttpError(400, "marketMaya.limitPriceSource must be fixed or trigger");
+    throw createHttpError(
+      400,
+      "marketMaya.limitPriceSource must be fixed, trigger, mstockHigh, or mstockLow"
+    );
   }
   return raw;
 }
@@ -241,6 +317,45 @@ function normalizeMarketMayaConfig(value) {
     value.limitPriceSource ?? value.limit_price_source ?? value.priceSource ?? value.price_source,
     limitPrice
   );
+  const explicitMStockApiType = normalizeMStockApiType(
+    value.mStockApiType ?? value.mstockApiType ?? value.mstock_api_type
+  );
+  const explicitMStockApiKey = normalizeString(
+    value.mStockApiKey ?? value.mstockApiKey ?? value.mstock_api_key
+  );
+  const explicitMStockAuthToken = normalizeString(
+    value.mStockAuthToken ?? value.mstockAuthToken ?? value.mstock_auth_token
+  );
+  const explicitMStockExchange = normalizeString(
+    value.mStockExchange ?? value.mstockExchange ?? value.mstock_exchange
+  ).toUpperCase();
+  const explicitMStockInstrumentToken = normalizeString(
+    value.mStockInstrumentToken ??
+      value.mstockInstrumentToken ??
+      value.mstock_instrument_token ??
+      value.mStockSymbolToken ??
+      value.mstockSymbolToken ??
+      value.mstock_symbol_token
+  );
+  const explicitMStockInterval = normalizeMStockInterval(
+    value.mStockInterval ?? value.mstockInterval ?? value.mstock_interval
+  );
+  const explicitMStockCandleOffset = normalizePositiveInt(
+    value.mStockCandleOffset ?? value.mstockCandleOffset ?? value.mstock_candle_offset
+  );
+  const mStockApiType =
+    explicitMStockApiType || normalizeMStockApiType(process.env.MSTOCK_API_TYPE);
+  const mStockApiKey = explicitMStockApiKey || normalizeString(process.env.MSTOCK_API_KEY);
+  const mStockAuthToken =
+    explicitMStockAuthToken || normalizeString(process.env.MSTOCK_AUTH_TOKEN);
+  const mStockExchange =
+    explicitMStockExchange || normalizeString(process.env.MSTOCK_EXCHANGE).toUpperCase();
+  const mStockInstrumentToken =
+    explicitMStockInstrumentToken || normalizeString(process.env.MSTOCK_INSTRUMENT_TOKEN);
+  const mStockInterval =
+    explicitMStockInterval || normalizeMStockInterval(process.env.MSTOCK_INTERVAL);
+  const mStockCandleOffset =
+    explicitMStockCandleOffset ?? normalizePositiveInt(process.env.MSTOCK_CANDLE_OFFSET);
   const bufferBy = normalizeString(value.bufferBy || value.buffer_by);
   const bufferValueRaw =
     value.bufferValue ??
@@ -322,6 +437,32 @@ function normalizeMarketMayaConfig(value) {
       "marketMaya.limitPrice is required when marketMaya.limitPriceSource is fixed"
     );
   }
+  if (limitPriceSource === "mstockHigh" || limitPriceSource === "mstockLow") {
+    if (!mStockApiType || !ALLOWED_MSTOCK_API_TYPES.has(mStockApiType)) {
+      throw createHttpError(400, "marketMaya.mStockApiType is required for mStock candle price");
+    }
+    if (!mStockApiKey) {
+      throw createHttpError(400, "marketMaya.mStockApiKey is required for mStock candle price");
+    }
+    if (!mStockAuthToken) {
+      throw createHttpError(
+        400,
+        "marketMaya.mStockAuthToken is required for mStock candle price"
+      );
+    }
+    if (!mStockExchange) {
+      throw createHttpError(400, "marketMaya.mStockExchange is required for mStock candle price");
+    }
+    if (!mStockInstrumentToken) {
+      throw createHttpError(
+        400,
+        "marketMaya.mStockInstrumentToken is required for mStock candle price"
+      );
+    }
+    if (!mStockInterval || !ALLOWED_MSTOCK_INTERVALS.has(mStockInterval)) {
+      throw createHttpError(400, "marketMaya.mStockInterval is required for mStock candle price");
+    }
+  }
   if (symbolMode === "manualList" && symbols.length === 0) {
     throw createHttpError(
       400,
@@ -370,6 +511,15 @@ function normalizeMarketMayaConfig(value) {
     ...(orderType ? { orderType } : {}),
     ...(limitPriceSource ? { limitPriceSource } : {}),
     ...(limitPrice ? { limitPrice } : {}),
+    ...(explicitMStockApiType ? { mStockApiType: explicitMStockApiType } : {}),
+    ...(explicitMStockApiKey ? { mStockApiKey: explicitMStockApiKey } : {}),
+    ...(explicitMStockAuthToken ? { mStockAuthToken: explicitMStockAuthToken } : {}),
+    ...(explicitMStockExchange ? { mStockExchange: explicitMStockExchange } : {}),
+    ...(explicitMStockInstrumentToken
+      ? { mStockInstrumentToken: explicitMStockInstrumentToken }
+      : {}),
+    ...(explicitMStockInterval ? { mStockInterval: explicitMStockInterval } : {}),
+    ...(explicitMStockCandleOffset ? { mStockCandleOffset: explicitMStockCandleOffset } : {}),
     ...(bufferBy ? { bufferBy } : {}),
     ...(Number.isFinite(bufferValue) && bufferValue >= 0 ? { bufferValue } : {}),
     ...(Number.isFinite(capitalAmount) && capitalAmount > 0 ? { capitalAmount } : {}),
