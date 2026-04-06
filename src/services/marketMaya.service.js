@@ -544,6 +544,36 @@ function getTimeoutMs() {
   return 15_000;
 }
 
+function extractPayloadMessage(payload, max = 260) {
+  if (!payload) return "";
+  if (typeof payload === "string") {
+    return toSafeSnippet(payload, max);
+  }
+  if (typeof payload !== "object") {
+    return toSafeSnippet(String(payload), max);
+  }
+  if (Array.isArray(payload) && payload.length === 0) {
+    return "";
+  }
+  if (!Array.isArray(payload) && Object.keys(payload).length === 0) {
+    return "";
+  }
+
+  const candidates = ["message", "status_message", "description", "detail", "msg", "error"];
+  for (const key of candidates) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return toSafeSnippet(value, max);
+    }
+  }
+
+  try {
+    return toSafeSnippet(JSON.stringify(payload), max);
+  } catch {
+    return "";
+  }
+}
+
 function extractErrorMessage(payload, meta = {}) {
   const contentType = meta.contentType || "";
   const headers = meta.headers || {};
@@ -698,7 +728,7 @@ function summarizeTradeResultForTelegram(result, max = 180) {
   }
 
   const responseMeta = result.result || {};
-  const summary = extractErrorMessage(responseMeta.payload, responseMeta);
+  const summary = extractPayloadMessage(responseMeta.payload, max);
   const status =
     Number.isFinite(Number(responseMeta.status)) && Number(responseMeta.status) > 0
       ? `HTTP ${Number(responseMeta.status)}`
@@ -706,7 +736,8 @@ function summarizeTradeResultForTelegram(result, max = 180) {
 
   if (status && summary) return `${status}: ${summary}`;
   if (summary) return summary;
-  return status || "Trade placed successfully";
+  if (status) return `${status}: Trade placed successfully`;
+  return "Trade placed successfully";
 }
 
 module.exports = {

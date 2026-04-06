@@ -142,7 +142,37 @@ function summarizeSettled(results) {
   }
   const successCount = results.filter((item) => item.status === "fulfilled").length;
   const failureCount = results.length - successCount;
-  return { successCount, failureCount };
+  const errors = results
+    .filter((item) => item.status === "rejected")
+    .map((item) => {
+      const reason = item.reason;
+      if (!reason) return "Unknown error";
+      if (reason instanceof Error && reason.message) return reason.message;
+      if (typeof reason === "string") return reason;
+      if (typeof reason === "object") {
+        if (typeof reason.message === "string" && reason.message.trim()) {
+          return reason.message;
+        }
+        if (typeof reason.error === "string" && reason.error.trim()) {
+          return reason.error;
+        }
+        try {
+          return JSON.stringify(reason);
+        } catch (err) {
+          return String(reason);
+        }
+      }
+      return String(reason);
+    })
+    .filter(Boolean);
+  const summary = { successCount, failureCount };
+  if (errors.length > 0) {
+    summary.error = errors[0];
+    if (errors.length > 1) {
+      summary.errors = errors.slice(0, 3);
+    }
+  }
+  return summary;
 }
 
 function normalizeBaseWebhookPayload(payload) {

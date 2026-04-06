@@ -902,6 +902,8 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       config: cfg,
       source: limitPriceSource,
       receivedAt,
+      symbol,
+      segment,
     });
 
     if (mStockResult.ok) {

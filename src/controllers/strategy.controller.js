@@ -3,6 +3,7 @@ const { parseBody } = require("../utils/body");
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
 const { normalizeClockTime } = require("../utils/clockTime");
+const { getGlobalMStockConfig } = require("../models/mstockConfig.model");
 const {
   createStrategy,
   listStrategies,
@@ -95,6 +96,26 @@ function normalizePositiveInt(value) {
   const numeric = value === undefined || value === null || value === "" ? NaN : Number(value);
   if (!Number.isFinite(numeric) || numeric <= 0) return undefined;
   return Math.floor(numeric);
+}
+
+function isPlaceholderMStockInstrumentToken(value) {
+  const compact = normalizeString(value).replace(/[^a-z0-9]/gi, "").toLowerCase();
+  if (!compact) return false;
+  return (
+    compact === "a" ||
+    compact === "b" ||
+    compact === "typea" ||
+    compact === "typeb" ||
+    compact === "instrumenttoken" ||
+    compact === "symboltoken" ||
+    compact === "token"
+  );
+}
+
+function hasUsableMStockInstrumentToken(value) {
+  const token = normalizeString(value);
+  if (!token) return false;
+  return !isPlaceholderMStockInstrumentToken(token);
 }
 
 function normalizeMStockApiType(value) {
@@ -281,7 +302,7 @@ function normalizeLimitPriceSource(value, limitPrice) {
   return raw;
 }
 
-function normalizeMarketMayaConfig(value) {
+function normalizeMarketMayaConfig(value, globalMStockConfig = {}) {
   if (!value || typeof value !== "object") return null;
 
   const exchange = normalizeString(value.exchange).toUpperCase();
@@ -357,18 +378,53 @@ function normalizeMarketMayaConfig(value) {
     value.mStockCandleOffset ?? value.mstockCandleOffset ?? value.mstock_candle_offset
   );
   const mStockApiType =
-    explicitMStockApiType || normalizeMStockApiType(process.env.MSTOCK_API_TYPE);
-  const mStockApiKey = explicitMStockApiKey || normalizeString(process.env.MSTOCK_API_KEY);
+    explicitMStockApiType ||
+    normalizeMStockApiType(globalMStockConfig.apiType) ||
+    normalizeMStockApiType(process.env.MSTOCK_API_TYPE);
+  const mStockApiKey =
+    explicitMStockApiKey ||
+    normalizeString(globalMStockConfig.apiKey) ||
+    normalizeString(process.env.MSTOCK_API_KEY);
   const mStockAuthToken =
-    explicitMStockAuthToken || normalizeString(process.env.MSTOCK_AUTH_TOKEN);
+    explicitMStockAuthToken ||
+    normalizeString(globalMStockConfig.authToken) ||
+    normalizeString(process.env.MSTOCK_AUTH_TOKEN);
   const mStockExchange =
-    explicitMStockExchange || normalizeString(process.env.MSTOCK_EXCHANGE).toUpperCase();
+    explicitMStockExchange ||
+    normalizeString(globalMStockConfig.exchange).toUpperCase() ||
+    normalizeString(process.env.MSTOCK_EXCHANGE).toUpperCase();
   const mStockInstrumentToken =
-    explicitMStockInstrumentToken || normalizeString(process.env.MSTOCK_INSTRUMENT_TOKEN);
+    (hasUsableMStockInstrumentToken(explicitMStockInstrumentToken)
+      ? explicitMStockInstrumentToken
+      : "") ||
+    (hasUsableMStockInstrumentToken(globalMStockConfig.instrumentToken)
+      ? normalizeString(globalMStockConfig.instrumentToken)
+      : "") ||
+    (hasUsableMStockInstrumentToken(process.env.MSTOCK_INSTRUMENT_TOKEN)
+      ? normalizeString(process.env.MSTOCK_INSTRUMENT_TOKEN)
+      : "");
   const mStockInterval =
-    explicitMStockInterval || normalizeMStockInterval(process.env.MSTOCK_INTERVAL);
+    explicitMStockInterval ||
+    normalizeMStockInterval(globalMStockConfig.interval) ||
+    normalizeMStockInterval(process.env.MSTOCK_INTERVAL);
   const mStockCandleOffset =
-    explicitMStockCandleOffset ?? normalizePositiveInt(process.env.MSTOCK_CANDLE_OFFSET);
+    explicitMStockCandleOffset ??
+    normalizePositiveInt(globalMStockConfig.candleOffset) ??
+    normalizePositiveInt(process.env.MSTOCK_CANDLE_OFFSET);
+  const hasGlobalMStockApiKey = Boolean(normalizeString(globalMStockConfig.apiKey));
+  const hasGlobalMStockAuthToken = Boolean(normalizeString(globalMStockConfig.authToken));
+  const hasGlobalMStockExchange = Boolean(normalizeString(globalMStockConfig.exchange));
+  const hasGlobalMStockInstrumentToken = hasUsableMStockInstrumentToken(
+    globalMStockConfig.instrumentToken
+  );
+  const hasGlobalMStockInterval = Boolean(normalizeString(globalMStockConfig.interval));
+  const hasEnvMStockApiKey = Boolean(normalizeString(process.env.MSTOCK_API_KEY));
+  const hasEnvMStockAuthToken = Boolean(normalizeString(process.env.MSTOCK_AUTH_TOKEN));
+  const hasEnvMStockExchange = Boolean(normalizeString(process.env.MSTOCK_EXCHANGE));
+  const hasEnvMStockInstrumentToken = hasUsableMStockInstrumentToken(
+    process.env.MSTOCK_INSTRUMENT_TOKEN
+  );
+  const hasEnvMStockInterval = Boolean(normalizeString(process.env.MSTOCK_INTERVAL));
   const bufferBy = normalizeString(value.bufferBy || value.buffer_by);
   const bufferValueRaw =
     value.bufferValue ??
@@ -456,29 +512,57 @@ function normalizeMarketMayaConfig(value) {
     limitPriceSource === "mstockOpen" ||
     limitPriceSource === "mstockClose"
   ) {
+    const canAutoResolveTypeBEqToken = mStockApiType === "typeB" && segment === "EQ";
     if (!mStockApiType || !ALLOWED_MSTOCK_API_TYPES.has(mStockApiType)) {
       throw createHttpError(400, "marketMaya.mStockApiType is required for mStock candle price");
     }
     if (!mStockApiKey) {
-      throw createHttpError(400, "marketMaya.mStockApiKey is required for mStock candle price");
+      throw createHttpError(
+        400,
+        !explicitMStockApiKey && !hasGlobalMStockApiKey && !hasEnvMStockApiKey
+          ? "Admin mStock defaults are incomplete: API key is not saved. Open Admin -> mStock Access."
+          : "Admin mStock defaults are incomplete: API key could not be resolved. Open Admin -> mStock Access and save mStock login again."
+      );
     }
     if (!mStockAuthToken) {
       throw createHttpError(
         400,
-        "marketMaya.mStockAuthToken is required for mStock candle price"
+        !explicitMStockAuthToken && !hasGlobalMStockAuthToken && !hasEnvMStockAuthToken
+          ? "Admin mStock defaults are incomplete: JWT token is not saved. Open Admin -> mStock Access."
+          : "Admin mStock defaults are incomplete: JWT token could not be resolved. Open Admin -> mStock Access and save mStock login again."
       );
     }
     if (!mStockExchange) {
-      throw createHttpError(400, "marketMaya.mStockExchange is required for mStock candle price");
-    }
-    if (!mStockInstrumentToken) {
       throw createHttpError(
         400,
-        "marketMaya.mStockInstrumentToken is required for mStock candle price"
+        !explicitMStockExchange && !hasGlobalMStockExchange && !hasEnvMStockExchange
+          ? "Admin mStock candle defaults are incomplete: exchange is not saved. Open Admin -> mStock Access and save Candle Defaults."
+          : "Admin mStock candle defaults are incomplete: exchange could not be resolved. Open Admin -> mStock Access and save Candle Defaults again."
+      );
+    }
+    if (!mStockInstrumentToken && !canAutoResolveTypeBEqToken) {
+      throw createHttpError(
+        400,
+        !explicitMStockInstrumentToken &&
+          !hasGlobalMStockInstrumentToken &&
+          !hasEnvMStockInstrumentToken
+          ? isPlaceholderMStockInstrumentToken(
+              explicitMStockInstrumentToken ||
+                globalMStockConfig.instrumentToken ||
+                process.env.MSTOCK_INSTRUMENT_TOKEN
+            )
+            ? "Admin mStock candle defaults look invalid: symboltoken / instrument token is saved as placeholder text like B or Type B. Open Admin -> mStock Access and replace it with the real symboltoken."
+            : "Admin mStock candle defaults are incomplete: symboltoken / instrument token is not saved. JWT login is saved separately. Open Admin -> mStock Access, paste the token in Candle Defaults, and click Save candle defaults."
+          : "Admin mStock candle defaults are incomplete: symboltoken / instrument token could not be resolved. Open Admin -> mStock Access and save Candle Defaults again."
       );
     }
     if (!mStockInterval || !ALLOWED_MSTOCK_INTERVALS.has(mStockInterval)) {
-      throw createHttpError(400, "marketMaya.mStockInterval is required for mStock candle price");
+      throw createHttpError(
+        400,
+        !explicitMStockInterval && !hasGlobalMStockInterval && !hasEnvMStockInterval
+          ? "Admin mStock candle defaults are incomplete: candle timeframe is not saved. Open Admin -> mStock Access and save Candle Defaults."
+          : "Admin mStock candle defaults are incomplete: candle timeframe could not be resolved. Open Admin -> mStock Access and save Candle Defaults again."
+      );
     }
   }
   if (symbolMode === "manualList" && symbols.length === 0) {
@@ -591,13 +675,14 @@ async function create(req, res) {
   }
 
   const body = await parseBody(req);
+  const globalMStockConfig = (await getGlobalMStockConfig().catch(() => null)) || {};
   const name = (body.name || "").trim();
   const webhookUrl = normalizeUrl(body.webhookUrl);
   const marketMayaUrl = normalizeUrl(body.marketMayaUrl);
   const enabled = Boolean(body.enabled);
   const emailEnabled = normalizeBoolean(body.emailEnabled, true);
   const telegramEnabled = Boolean(body.telegramEnabled);
-  const marketMaya = normalizeMarketMayaConfig(body.marketMaya);
+  const marketMaya = normalizeMarketMayaConfig(body.marketMaya, globalMStockConfig);
   const marketMayaConfig = marketMaya || buildDefaultTradeWindowConfig();
   const marketMayaTokenRaw = body.marketMayaToken;
   const marketMayaToken = normalizeString(marketMayaTokenRaw);
@@ -670,6 +755,7 @@ async function update(req, res) {
   }
 
   const body = await parseBody(req);
+  const globalMStockConfig = (await getGlobalMStockConfig().catch(() => null)) || {};
   const strategyId = String(body.strategyId || body._id || body.id || "").trim();
   const webhookKey = normalizeString(body.webhookKey || body.webhook_key);
 
@@ -677,7 +763,7 @@ async function update(req, res) {
   const marketMayaUrl = normalizeUrl(body.marketMayaUrl);
   const enabled = Boolean(body.enabled);
   const telegramEnabled = Boolean(body.telegramEnabled);
-  const marketMaya = normalizeMarketMayaConfig(body.marketMaya);
+  const marketMaya = normalizeMarketMayaConfig(body.marketMaya, globalMStockConfig);
   const marketMayaConfig = marketMaya || buildDefaultTradeWindowConfig();
   const marketMayaToken = normalizeString(body.marketMayaToken);
   const marketMayaClear = normalizeClearList(

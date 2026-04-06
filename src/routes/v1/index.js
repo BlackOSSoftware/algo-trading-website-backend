@@ -57,6 +57,14 @@ const {
   approvePlanRequest,
   rejectPlanRequest,
 } = require("../../controllers/admin.controller");
+const {
+  typeBLoginAdmin,
+  typeBSessionTokenAdmin,
+  typeBVerifyTotpAdmin,
+  getSavedDefaultsAdmin,
+  testMarketDataAdmin,
+  updateSavedDefaultsAdmin,
+} = require("../../controllers/mstock.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 function registerV1Routes(router) {
@@ -116,6 +124,12 @@ function registerV1Routes(router) {
   router.post("/api/v1/admin/marketmaya/trade", requireAdmin(tradeAdmin));
   router.post("/api/v1/admin/marketmaya/getcallhistory", requireAdmin(callHistoryAdmin));
   router.post("/api/v1/admin/marketmaya/getsymbolposition", requireAdmin(symbolPositionAdmin));
+  router.post("/api/v1/admin/mstock/typeb/login", requireAdmin(typeBLoginAdmin));
+  router.post("/api/v1/admin/mstock/typeb/session/token", requireAdmin(typeBSessionTokenAdmin));
+  router.post("/api/v1/admin/mstock/typeb/session/verifytotp", requireAdmin(typeBVerifyTotpAdmin));
+  router.get("/api/v1/admin/mstock/defaults", requireAdmin(getSavedDefaultsAdmin));
+  router.post("/api/v1/admin/mstock/test-market-data", requireAdmin(testMarketDataAdmin));
+  router.post("/api/v1/admin/mstock/defaults", requireAdmin(updateSavedDefaultsAdmin));
 }
 
 module.exports = { registerV1Routes };
