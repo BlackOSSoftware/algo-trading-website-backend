@@ -80,6 +80,9 @@ const {
   exchangeSharekhanToken,
   completeSharekhanLogin,
   consumeSharekhanLoginResult,
+  getSharekhanOrders,
+  getSharekhanTradePositions,
+  getSharekhanSessionStatus,
 } = require("../../controllers/sharekhan.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
@@ -152,6 +155,9 @@ function registerV1Routes(router) {
   router.get("/api/v1/admin/mstock/instruments/search", requireAdmin(searchInstrumentsAdmin));
   router.get("/api/v1/mstock/instruments/search", requireAuth(searchInstruments));
   router.post("/api/v1/sharekhan/trade", requireAuth(placeSharekhanTrade));
+  router.post("/api/v1/sharekhan/orders", requireAuth(getSharekhanOrders));
+  router.post("/api/v1/sharekhan/positions", requireAuth(getSharekhanTradePositions));
+  router.post("/api/v1/sharekhan/session-status", requireAuth(getSharekhanSessionStatus));
   router.post("/api/v1/sharekhan/login-url", requireAuth(getSharekhanLoginUrl));
   router.post("/api/v1/sharekhan/login-prep", requireAuth(saveSharekhanLoginSession));
   router.get("/api/v1/sharekhan/login-prep", requireAuth(getSharekhanLoginSession));

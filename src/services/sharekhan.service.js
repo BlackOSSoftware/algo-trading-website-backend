@@ -735,10 +735,170 @@ async function exchangeSharekhanAccessToken({
   };
 }
 
+async function getSharekhanDayOrders({ apiKey, accessToken, customerId }) {
+  const resolvedApiKey = normalizeString(apiKey);
+  const resolvedAccessToken = normalizeString(accessToken);
+  const resolvedCustomerId = normalizeString(customerId);
+  if (!resolvedApiKey || !resolvedAccessToken || !resolvedCustomerId) {
+    return {
+      ok: false,
+      error: "Sharekhan API Key, Access Token, and Customer ID are required",
+    };
+  }
+
+  const url = `${DEFAULT_BASE_URL}/skapi/services/reports/${encodeURIComponent(resolvedCustomerId)}`;
+  const response = await fetchSharekhan(url, {
+    method: "GET",
+    headers: buildSharekhanHeaders({
+      apiKey: resolvedApiKey,
+      accessToken: resolvedAccessToken,
+    }),
+  });
+
+  const error = response.ok ? null : extractErrorMessage(response.payload, response.status);
+  const expired = isSharekhanTokenExpiredError(response.status, error, response.payload);
+  const ok = Boolean(response.ok);
+  const data =
+    response.payload?.data ||
+    response.payload?.result ||
+    response.payload?.orders ||
+    response.payload;
+
+  return {
+    ok,
+    broker: "sharekhan",
+    type: "orders",
+    status: response.status,
+    expired,
+    customerId: resolvedCustomerId,
+    orders: Array.isArray(data) ? data : data,
+    result: sanitizeSharekhanPayload(response.payload),
+    error: ok ? null : error,
+  };
+}
+
+function isSharekhanTokenExpiredError(status, errorMessage, payload) {
+  const code = Number(status);
+  if (code === 401 || code === 403) return true;
+  const text = [
+    errorMessage,
+    payload?.message,
+    payload?.error,
+    payload?.errormsg,
+    payload?.data?.errormsg,
+    payload?.data?.message,
+    typeof payload === "string" ? payload : "",
+  ]
+    .map((item) => normalizeString(item).toLowerCase())
+    .join(" ");
+  return /token.*(expir|invalid|unauthor)|expir.*token|session.*(expir|invalid)|unauthori|access.?denied|invalid.?access/.test(
+    text
+  );
+}
+
+async function checkSharekhanSession({ apiKey, accessToken, customerId }) {
+  const resolvedApiKey = normalizeString(apiKey);
+  const resolvedAccessToken = normalizeString(accessToken);
+  const resolvedCustomerId = normalizeString(customerId);
+
+  if (!resolvedApiKey || !resolvedAccessToken) {
+    return {
+      ok: false,
+      connected: false,
+      expired: false,
+      missing: true,
+      error: "Sharekhan API Key and Access Token are required",
+    };
+  }
+
+  if (!resolvedCustomerId) {
+    return {
+      ok: false,
+      connected: false,
+      expired: false,
+      missing: true,
+      error: "Sharekhan Customer ID is required to verify session",
+    };
+  }
+
+  const probe = await getSharekhanDayOrders({
+    apiKey: resolvedApiKey,
+    accessToken: resolvedAccessToken,
+    customerId: resolvedCustomerId,
+  });
+
+  if (probe.ok) {
+    return {
+      ok: true,
+      connected: true,
+      expired: false,
+      missing: false,
+      status: probe.status,
+      customerId: resolvedCustomerId,
+      error: null,
+    };
+  }
+
+  return {
+    ok: false,
+    connected: false,
+    expired: Boolean(probe.expired),
+    missing: false,
+    status: probe.status,
+    customerId: resolvedCustomerId,
+    error: probe.error || "Sharekhan session is not valid",
+  };
+}
+
+async function getSharekhanPositions({ apiKey, accessToken, customerId }) {
+  const resolvedApiKey = normalizeString(apiKey);
+  const resolvedAccessToken = normalizeString(accessToken);
+  const resolvedCustomerId = normalizeString(customerId);
+  if (!resolvedApiKey || !resolvedAccessToken || !resolvedCustomerId) {
+    return {
+      ok: false,
+      error: "Sharekhan API Key, Access Token, and Customer ID are required",
+    };
+  }
+
+  const url = `${DEFAULT_BASE_URL}/skapi/services/trades/${encodeURIComponent(resolvedCustomerId)}`;
+  const response = await fetchSharekhan(url, {
+    method: "GET",
+    headers: buildSharekhanHeaders({
+      apiKey: resolvedApiKey,
+      accessToken: resolvedAccessToken,
+    }),
+  });
+
+  const ok = Boolean(response.ok);
+  const error = ok ? null : extractErrorMessage(response.payload, response.status);
+  const expired = isSharekhanTokenExpiredError(response.status, error, response.payload);
+  const data =
+    response.payload?.data ||
+    response.payload?.result ||
+    response.payload?.trades ||
+    response.payload;
+
+  return {
+    ok,
+    broker: "sharekhan",
+    type: "positions",
+    status: response.status,
+    expired,
+    customerId: resolvedCustomerId,
+    positions: Array.isArray(data) ? data : data,
+    result: sanitizeSharekhanPayload(response.payload),
+    error,
+  };
+}
+
 module.exports = {
   placeSharekhanOrder,
   mapCallTypeToTransaction,
   mapExchangeCode,
   buildSharekhanLoginUrl,
   exchangeSharekhanAccessToken,
+  getSharekhanDayOrders,
+  getSharekhanPositions,
+  checkSharekhanSession,
 };

@@ -5,6 +5,9 @@ const {
   placeSharekhanOrder,
   buildSharekhanLoginUrl,
   exchangeSharekhanAccessToken,
+  getSharekhanDayOrders,
+  getSharekhanPositions,
+  checkSharekhanSession,
 } = require("../services/sharekhan.service");
 const {
   saveSharekhanLoginPrep,
@@ -67,11 +70,26 @@ async function placeSharekhanTrade(req, res) {
 
   const body = await parseBody(req);
   const execute = Boolean(body.execute);
+  const saved = (await getSharekhanDbConfig(userId)) || {};
+  const apiKey = String(body.apiKey || body.sharekhanApiKey || saved.apiKey || "").trim();
+  const accessToken = String(
+    body.accessToken || body.sharekhanAccessToken || saved.accessToken || ""
+  ).trim();
+  const customerId = String(
+    body.customerId || body.sharekhanCustomerId || saved.customerId || ""
+  ).trim();
+  const channelUser = String(
+    body.channelUser || body.sharekhanChannelUser || body.loginId || saved.channelUser || ""
+  ).trim();
+  const productType = String(
+    body.productType || body.producttype || body.sharekhanProductType || saved.productType || ""
+  ).trim();
+
   const result = await placeSharekhanOrder({
-    apiKey: body.apiKey || body.sharekhanApiKey,
-    accessToken: body.accessToken || body.sharekhanAccessToken,
-    customerId: body.customerId || body.sharekhanCustomerId,
-    channelUser: body.channelUser || body.sharekhanChannelUser || body.loginId,
+    apiKey,
+    accessToken,
+    customerId,
+    channelUser,
     execute,
     exchange: body.exchange,
     segment: body.segment,
@@ -79,7 +97,7 @@ async function placeSharekhanTrade(req, res) {
     symbolToken: body.symbolToken || body.symboltoken || body.scripCode || body.token,
     callType: body.call_type || body.callType || body.transactionType,
     quantity: body.quantity || body.qty_value || body.qtyValue,
-    productType: body.productType || body.producttype || body.sharekhanProductType,
+    productType,
     price: body.price || "0",
     triggerPrice: body.triggerPrice || body.triggerprice || "0",
   });
@@ -166,12 +184,64 @@ async function getSharekhanLoginSession(req, res) {
 
   const prep = getSharekhanLoginPrep(userId);
   const saved = await getSharekhanDbConfig(userId);
-  const merged = prep || saved
+
+  let fromStrategy = null;
+  try {
+    const { listStrategies } = require("../services/strategy.service");
+    const strategies = await listStrategies(userId);
+    const source = Array.isArray(strategies) ? strategies : [];
+    for (let i = source.length - 1; i >= 0; i -= 1) {
+      const mm = source[i]?.marketMaya;
+      if (!mm || typeof mm !== "object") continue;
+      const apiKey = String(mm.sharekhanApiKey || "").trim();
+      const accessToken = String(mm.sharekhanAccessToken || "").trim();
+      const customerId = String(mm.sharekhanCustomerId || "").trim();
+      const channelUser = String(mm.sharekhanChannelUser || "").trim();
+      if (!apiKey && !accessToken && !customerId && !channelUser) continue;
+      fromStrategy = {
+        apiKey,
+        secureKey: String(mm.sharekhanSecureKey || "").trim(),
+        customerId,
+        channelUser,
+        accessToken,
+        productType: String(mm.sharekhanProductType || "").trim(),
+        connected: Boolean(accessToken),
+      };
+      if (apiKey && accessToken && customerId) break;
+    }
+  } catch {
+    // strategy fallback is optional
+  }
+
+  const pick = (...values) => {
+    for (const value of values) {
+      const text = String(value || "").trim();
+      if (text) return text;
+    }
+    return "";
+  };
+
+  const merged = prep || saved || fromStrategy
     ? {
-        ...(saved || {}),
-        ...(prep || {}),
+        apiKey: pick(prep?.apiKey, saved?.apiKey, fromStrategy?.apiKey),
+        secureKey: pick(prep?.secureKey, saved?.secureKey, fromStrategy?.secureKey),
+        customerId: pick(prep?.customerId, saved?.customerId, fromStrategy?.customerId),
+        channelUser: pick(prep?.channelUser, saved?.channelUser, fromStrategy?.channelUser),
+        accessToken: pick(prep?.accessToken, saved?.accessToken, fromStrategy?.accessToken),
+        productType: pick(prep?.productType, saved?.productType, fromStrategy?.productType),
+        connected: Boolean(
+          prep?.connected ||
+            saved?.connected ||
+            fromStrategy?.connected ||
+            pick(prep?.accessToken, saved?.accessToken, fromStrategy?.accessToken)
+        ),
+        mode: prep?.mode || "add",
+        strategyId: prep?.strategyId || "",
+        returnTo: prep?.returnTo || "/strategy",
+        formDraft: prep?.formDraft || null,
       }
     : null;
+
   sendJson(res, 200, {
     ok: true,
     prep: merged
@@ -381,6 +451,85 @@ async function consumeSharekhanLoginResult(req, res) {
   sendJson(res, 200, { ok: true, result: result || null });
 }
 
+function resolveSharekhanCredsFromReq(body, saved) {
+  return {
+    apiKey: String(body.apiKey || body.sharekhanApiKey || saved.apiKey || "").trim(),
+    accessToken: String(
+      body.accessToken || body.sharekhanAccessToken || saved.accessToken || ""
+    ).trim(),
+    customerId: String(
+      body.customerId || body.sharekhanCustomerId || saved.customerId || ""
+    ).trim(),
+    channelUser: String(
+      body.channelUser || body.sharekhanChannelUser || body.loginId || saved.channelUser || ""
+    ).trim(),
+  };
+}
+
+async function getSharekhanOrders(req, res) {
+  const userId = req.user?.sub;
+  if (!userId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+  const body = await parseBody(req).catch(() => ({}));
+  const saved = (await getSharekhanDbConfig(userId)) || {};
+  const creds = resolveSharekhanCredsFromReq(body || {}, saved);
+  const result = await getSharekhanDayOrders(creds);
+  if (!result.ok) {
+    throw createHttpError(400, result.error || "Failed to fetch Sharekhan orders");
+  }
+  sendJson(res, 200, result);
+}
+
+async function getSharekhanTradePositions(req, res) {
+  const userId = req.user?.sub;
+  if (!userId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+  const body = await parseBody(req).catch(() => ({}));
+  const saved = (await getSharekhanDbConfig(userId)) || {};
+  const creds = resolveSharekhanCredsFromReq(body || {}, saved);
+  const result = await getSharekhanPositions(creds);
+  if (!result.ok) {
+    throw createHttpError(400, result.error || "Failed to fetch Sharekhan positions");
+  }
+  sendJson(res, 200, result);
+}
+
+async function getSharekhanSessionStatus(req, res) {
+  const userId = req.user?.sub;
+  if (!userId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+  const body = await parseBody(req).catch(() => ({}));
+  const saved = (await getSharekhanDbConfig(userId)) || {};
+  const creds = resolveSharekhanCredsFromReq(body || {}, saved);
+  const result = await checkSharekhanSession(creds);
+
+  if (result.expired) {
+    await saveSharekhanDbConfig(userId, {
+      connected: false,
+    }).catch(() => null);
+  } else if (result.connected) {
+    await saveSharekhanDbConfig(userId, {
+      connected: true,
+      accessToken: creds.accessToken || undefined,
+      apiKey: creds.apiKey || undefined,
+      customerId: creds.customerId || undefined,
+      channelUser: creds.channelUser || undefined,
+    }).catch(() => null);
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    ...result,
+    channelUser: creds.channelUser || "",
+    hasAccessToken: Boolean(creds.accessToken),
+    hasApiKey: Boolean(creds.apiKey),
+    hasCustomerId: Boolean(creds.customerId),
+  });
+}
+
 module.exports = {
   placeSharekhanTrade,
   getSharekhanLoginUrl,
@@ -389,4 +538,7 @@ module.exports = {
   exchangeSharekhanToken,
   completeSharekhanLogin,
   consumeSharekhanLoginResult,
+  getSharekhanOrders,
+  getSharekhanTradePositions,
+  getSharekhanSessionStatus,
 };
