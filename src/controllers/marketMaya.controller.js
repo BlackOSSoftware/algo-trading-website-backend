@@ -53,8 +53,6 @@ function formatTradeNotification({ title, params, result }) {
   const exchange = normalizeString(params.exchange).toUpperCase();
   const segment = normalizeString(params.segment).toUpperCase();
   const callType = normalizeString(params.call_type).toUpperCase();
-  const orderType = normalizeString(params.order_type).toUpperCase();
-  const price = normalizeString(params.price);
   const symbol = normalizeString(params.symbol);
   const symbolCode = normalizeString(params.symbol_code);
   const mode = result?.dryRun ? "DRY-RUN" : "LIVE";
@@ -63,7 +61,6 @@ function formatTradeNotification({ title, params, result }) {
   return [
     `${title}: ${callType || "TRADE"} ${symbol || symbolCode || ""}`.trim(),
     exchange || segment ? `Market: ${[exchange, segment].filter(Boolean).join(" - ")}` : null,
-    orderType ? `Order Type: ${orderType}${price ? ` @ ${price}` : ""}` : null,
     `Mode: ${mode}`,
     `Status: ${status}`,
     summarizeTradeResultForTelegram(result)
@@ -179,8 +176,6 @@ function pickTradeParams(body) {
     "atm",
     "strike_price",
     "call_type",
-    "order_type",
-    "price",
     "qty_distribution",
     "qty_value",
     "target_by",
@@ -214,9 +209,9 @@ function normalizeTradeParams(params) {
     normalized.call_type = normalizeString(normalized.call_type).toUpperCase();
   }
 
-  if (normalized.order_type !== undefined) {
-    normalized.order_type = normalizeString(normalized.order_type).toUpperCase();
-  }
+  // order_type/price removed from Market Maya REST API — never forward them.
+  delete normalized.order_type;
+  delete normalized.price;
 
   if (!isTruthy(normalized.is_trail_sl)) {
     delete normalized.is_trail_sl;

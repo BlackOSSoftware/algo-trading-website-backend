@@ -79,9 +79,34 @@ function isEmailAlertEnabled(strategy) {
   return strategy?.emailEnabled !== false;
 }
 
+function formatCandleTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "Not provided";
+  const date = new Date(raw);
+  if (Number.isNaN(date.valueOf())) return raw;
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Asia/Kolkata",
+  }).format(date);
+}
+
+function formatCandleInterval(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) return "Not available";
+  if (raw === "day") return "1 Day candle";
+  if (raw.endsWith("minute")) {
+    return `${raw.replace(/minute$/, "") || "1"} Minute candle`;
+  }
+  return `${value} candle`;
+}
+
 function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
   const mode = tradeResult.execute ? "LIVE" : "DRY-RUN";
-  const lines = [`TRADE: ${strategyName}`, `Mode: ${mode}`];
+  const lines = [
+    `TRADE ALERT: ${strategyName}`,
+    `Mode: ${mode === "DRY-RUN" ? "TEST ONLY (No live order placed)" : "LIVE TRADE"}`,
+  ];
 
   if (tradeResult.skipped) {
     lines.push("Status: SKIPPED");
@@ -90,27 +115,56 @@ function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
     return lines.join("\n");
   }
 
-  const symbols = (tradeResult.trades || [])
-    .map((t) => t.symbol || t.symbolCode)
-    .filter(Boolean);
-  const unique = Array.from(new Set(symbols));
-  const shown = unique.slice(0, 10).join(", ");
-  if (shown) {
-    lines.push(`Symbols: ${shown}${unique.length > 10 ? ` +${unique.length - 10} more` : ""}`);
+  const priceBlocks = (tradeResult.trades || [])
+    .map((trade) => {
+      const details = trade.priceDetails;
+      if (!details?.label) return [];
+      const label = trade.symbol || trade.symbolCode || "Trade";
+      const sourceLabel = String(details.label)
+        .replace(/^(mStock|webhook) candle /i, "Candle ")
+        .replace(/\b(high|low|open|close)\b/i, (value) => (
+          value.charAt(0).toUpperCase() + value.slice(1).toLowerCase()
+        ));
+      const candleLevel = sourceLabel.replace(/^Candle /, "");
+      const candleSource = details.fallback
+        ? tradeResult.execute
+          ? "Webhook alert value"
+          : "Test alert value"
+        : "mStock candle data";
+      const candleOffset = Number(details.candleOffset || 1);
+      const candleUsed = candleOffset === 1 ? "Latest candle" : `${candleOffset} candles back`;
+      const callType = trade.params?.call_type || trade.request?.params?.call_type || "";
+      const orderType = trade.orderType || trade.params?.order_type || trade.request?.params?.order_type || "";
+      return [
+        `Stock: ${label}`,
+        callType || orderType ? `Order: ${[callType, orderType].filter(Boolean).join(" ")}` : null,
+        `Candle Timeframe: ${formatCandleInterval(details.interval)}`,
+        `Candle Time (IST): ${formatCandleTime(details.candleTime)}`,
+        `Candle Used: ${candleUsed}`,
+        `Price Selected: ${candleLevel}`,
+        `${candleLevel} Price: ${details.sourcePrice || "Unavailable"}`,
+        `Order Price: ${details.tradePrice || "Not calculated"}`,
+        `Price Data From: ${candleSource}`,
+      ].filter(Boolean);
+    })
+    .filter((block) => block.length > 0);
+  if (priceBlocks.length > 0) {
+    lines.push("", "TRADE PRICE DETAILS");
+    priceBlocks.slice(0, 3).forEach((block, index) => {
+      if (index > 0) lines.push("");
+      lines.push(...block);
+    });
+    if (priceBlocks.length > 3) {
+      lines.push(`+${priceBlocks.length - 3} more instruments`);
+    }
   }
 
-  const orderTypes = Array.from(
-    new Set(
-      (tradeResult.trades || [])
-        .map((t) => t.orderType || t.params?.order_type || t.request?.params?.order_type)
-        .filter(Boolean)
-    )
+  lines.push(
+    "",
+    tradeResult.execute
+      ? `Trade Status: ${tradeResult.successCount} successful / ${tradeResult.failureCount} failed`
+      : `Test Status: ${tradeResult.successCount} successful / ${tradeResult.failureCount} failed`
   );
-  if (orderTypes.length > 0) {
-    lines.push(`Order Type: ${orderTypes.join(", ")}`);
-  }
-
-  lines.push(`Result: ${tradeResult.successCount} ok / ${tradeResult.failureCount} failed`);
   if (tradeResult.failureCount > 0) {
     const firstError = (tradeResult.trades || []).find((t) => !t.ok)?.error;
     if (firstError) lines.push(`Error: ${firstError}`);
@@ -124,7 +178,7 @@ function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
       return `${label}: ${summary}`;
     })
     .filter(Boolean);
-  if (responseLines.length > 0) {
+  if (responseLines.length > 0 && priceBlocks.length === 0) {
     lines.push("Market Maya Response:");
     responseLines.slice(0, 3).forEach((line) => lines.push(line));
     if (responseLines.length > 3) {
@@ -132,7 +186,7 @@ function formatTradeSummary({ strategyName, receivedAt, tradeResult }) {
     }
   }
 
-  lines.push(`Received: ${receivedAt}`);
+  lines.push(`Alert Received (IST): ${formatCandleTime(receivedAt)}`);
   return lines.join("\n");
 }
 
@@ -426,7 +480,7 @@ async function signalWebhook(provider, req, res) {
             recipients: recipients.size,
           },
           marketMaya: {
-            enabled: Boolean(strategy.enabled),
+            enabled: Boolean(strategy.marketMaya?.token || process.env.MARKETMAYA_TOKEN),
           },
         };
 
@@ -472,34 +526,76 @@ async function signalWebhook(provider, req, res) {
         if (!strategy.enabled) {
           debug.marketMaya.skipped = true;
           debug.marketMaya.reason = "Strategy disabled";
+          debug.sharekhan = {
+            enabled: Boolean(strategy.marketMaya?.sharekhanDirect),
+            skipped: true,
+            reason: "Strategy disabled",
+            total: 0,
+            successCount: 0,
+            failureCount: 0,
+            trades: [],
+          };
         } else {
           try {
             tradeResult = await executeStrategyAutoTrades({
               strategy,
               payload,
               receivedAt,
+              sharekhanConfig: owner?.sharekhan || null,
             });
 
             debug.marketMaya.execute = Boolean(tradeResult.execute);
             debug.marketMaya.ok = Boolean(tradeResult.ok);
-            debug.marketMaya.skipped = Boolean(tradeResult.skipped);
+            debug.marketMaya.enabled = Boolean(tradeResult.marketMayaEnabled);
+            debug.marketMaya.skipped = Boolean(tradeResult.marketMayaEnabled && tradeResult.skipped);
             debug.marketMaya.total = Number(tradeResult.total || 0);
             debug.marketMaya.successCount = Number(tradeResult.successCount || 0);
             debug.marketMaya.failureCount = Number(tradeResult.failureCount || 0);
-            if (tradeResult.error) debug.marketMaya.error = tradeResult.error;
+            if (tradeResult.marketMayaEnabled && tradeResult.error) debug.marketMaya.error = tradeResult.error;
 
             if (Array.isArray(tradeResult.trades)) {
-              debug.marketMaya.trades = tradeResult.trades.map((trade) => ({
+              const mmTrades = tradeResult.trades.filter(
+                (trade) => !trade.broker || trade.broker === "marketMaya"
+              );
+              const skTrades = tradeResult.trades.filter((trade) => trade.broker === "sharekhan");
+
+              debug.marketMaya.trades = mmTrades.map((trade) => ({
                 symbol: trade.symbol || "",
                 symbolCode: trade.symbolCode || "",
                 orderType:
                   trade.orderType || trade.params?.order_type || trade.request?.params?.order_type || null,
                 price: trade.price || trade.params?.price || trade.request?.params?.price || null,
+                priceDetails: trade.priceDetails || null,
                 ok: Boolean(trade.ok),
                 dryRun: Boolean(trade.dryRun),
                 error: trade.error || null,
+                brokerStatus: trade.brokerStatus || null,
+                brokerRemark: trade.brokerRemark || null,
+                brokerTime: trade.brokerTime || null,
+                brokerMatched: Boolean(trade.brokerMatched),
                 params: trade.params || trade.request?.params || null,
               }));
+
+              debug.sharekhan = {
+                enabled: Boolean(tradeResult.sharekhanEnabled),
+                ok: skTrades.length ? skTrades.every((t) => t.ok) : null,
+                skipped: Boolean(tradeResult.skipped && !skTrades.length),
+                reason: tradeResult.skipped && !skTrades.length ? tradeResult.error || "Order skipped" : undefined,
+                total: skTrades.length,
+                successCount: skTrades.filter((t) => t.ok).length,
+                failureCount: skTrades.filter((t) => !t.ok).length,
+                trades: skTrades.map((trade) => ({
+                  symbol: trade.symbol || "",
+                  orderId: trade.orderId || "",
+                  status: trade.status || trade.result?.status || null,
+                  ok: Boolean(trade.ok),
+                  dryRun: Boolean(trade.dryRun),
+                  error: trade.error || null,
+                  errorDetails: trade.errorDetails || null,
+                  response: trade.errorDetails?.payload || trade.result?.payload || null,
+                  request: trade.request || trade.preview || null,
+                })),
+              };
             }
           } catch (err) {
             debug.marketMaya.skipped = true;

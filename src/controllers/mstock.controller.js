@@ -8,6 +8,9 @@ const {
   typeBVerifyTotp,
   normalizeInterval,
   testMStockMarketData,
+  syncMStockInstrumentMaster,
+  searchMStockInstruments,
+  getMStockInstrumentCount,
 } = require("../services/mstock.service");
 
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
@@ -440,6 +443,78 @@ async function updateSavedDefaultsAdmin(req, res) {
   });
 }
 
+async function syncInstrumentsAdmin(req, res) {
+  const adminId = req.user?.sub;
+  if (!adminId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+
+  const result = await syncMStockInstrumentMaster();
+  if (!result.ok) {
+    throw createHttpError(400, result.error || "Failed to sync mStock instruments");
+  }
+
+  sendJson(res, 200, {
+    ok: true,
+    message: "mStock instrument master synced",
+    totalFetched: result.totalFetched,
+    totalStored: result.totalStored,
+    syncedAt: result.syncedAt,
+  });
+}
+
+async function getInstrumentStatsAdmin(req, res) {
+  const adminId = req.user?.sub;
+  if (!adminId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+
+  const total = await getMStockInstrumentCount();
+  sendJson(res, 200, { ok: true, total });
+}
+
+async function searchInstrumentsAdmin(req, res) {
+  const adminId = req.user?.sub;
+  if (!adminId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+
+  const params = req.parsedUrl?.searchParams;
+  const q = params ? params.get("q") || "" : "";
+  const exchange = params ? params.get("exchange") || "" : "";
+  const instrumentType = params ? params.get("instrumentType") || "" : "";
+  const limitRaw = params ? params.get("limit") : null;
+  const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
+
+  const instruments = await searchMStockInstruments(q, {
+    limit,
+    exchange,
+    instrumentType,
+  });
+  sendJson(res, 200, { ok: true, instruments });
+}
+
+async function searchInstruments(req, res) {
+  const userId = req.user?.sub;
+  if (!userId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+
+  const params = req.parsedUrl?.searchParams;
+  const q = params ? params.get("q") || "" : "";
+  const exchange = params ? params.get("exchange") || "" : "";
+  const instrumentType = params ? params.get("instrumentType") || "" : "";
+  const limitRaw = params ? params.get("limit") : null;
+  const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
+
+  const instruments = await searchMStockInstruments(q, {
+    limit,
+    exchange,
+    instrumentType,
+  });
+  sendJson(res, 200, { ok: true, instruments });
+}
+
 module.exports = {
   typeBLoginAdmin,
   typeBSessionTokenAdmin,
@@ -447,4 +522,8 @@ module.exports = {
   getSavedDefaultsAdmin,
   testMarketDataAdmin,
   updateSavedDefaultsAdmin,
+  syncInstrumentsAdmin,
+  getInstrumentStatsAdmin,
+  searchInstrumentsAdmin,
+  searchInstruments,
 };

@@ -575,6 +575,57 @@ function normalizeMarketMayaConfig(value, globalMStockConfig = {}) {
   const maxSymbolsRaw = value.maxSymbols;
   const maxSymbols = maxSymbolsRaw !== undefined ? Number(maxSymbolsRaw) : undefined;
   const dryRun = Boolean(value.dryRun);
+  const marketMayaEnabledRaw = value.marketMayaEnabled ?? value.market_maya_enabled;
+  const marketMayaEnabled =
+    marketMayaEnabledRaw === undefined || marketMayaEnabledRaw === null
+      ? undefined
+      : Boolean(marketMayaEnabledRaw);
+  const sharekhanDirect = Boolean(
+    value.sharekhanDirect ?? value.sharekhan_direct ?? value.directSharekhan
+  );
+  const sharekhanApiKey = normalizeString(
+    value.sharekhanApiKey ?? value.sharekhan_api_key ?? value.apiKey
+  );
+  const sharekhanAccessToken = normalizeString(
+    value.sharekhanAccessToken ?? value.sharekhan_access_token ?? value.accessToken
+  );
+  const sharekhanSecureKey = normalizeString(
+    value.sharekhanSecureKey ?? value.sharekhan_secure_key ?? value.secureKey ?? value.secretKey
+  );
+  const sharekhanCustomerId = normalizeString(
+    value.sharekhanCustomerId ??
+      value.sharekhan_customer_id ??
+      value.customerId
+  );
+  const sharekhanChannelUser = normalizeString(
+    value.sharekhanChannelUser ??
+      value.sharekhan_channel_user ??
+      value.channelUser ??
+      value.loginId
+  );
+  const sharekhanProductType = normalizeString(
+    value.sharekhanProductType ?? value.sharekhan_product_type ?? value.productType
+  ).toUpperCase();
+  if (
+    sharekhanProductType &&
+    ![
+      "INVESTMENT",
+      "INV",
+      "BIGTRADE",
+      "BT",
+      "BIGTRADEPLUS",
+      "BT+",
+      "DELIVERY",
+      "INTRADAY",
+      "MARGIN",
+      "CARRYFORWARD",
+    ].includes(sharekhanProductType)
+  ) {
+    throw createHttpError(
+      400,
+      "marketMaya.sharekhanProductType must be INVESTMENT, BIGTRADE, or DELIVERY/INTRADAY"
+    );
+  }
   const dailyTradeLimitRaw =
     value.dailyTradeLimit ?? value.daily_trade_limit ?? value.tradeLimit ?? value.trade_limit;
   const dailyTradeLimit =
@@ -641,6 +692,14 @@ function normalizeMarketMayaConfig(value, globalMStockConfig = {}) {
       : {}),
     ...(Number.isFinite(maxSymbols) ? { maxSymbols } : {}),
     ...(dryRun ? { dryRun } : {}),
+    ...(marketMayaEnabled === undefined ? {} : { marketMayaEnabled: Boolean(marketMayaEnabled) }),
+    sharekhanDirect: Boolean(sharekhanDirect),
+    ...(sharekhanApiKey ? { sharekhanApiKey } : {}),
+    ...(sharekhanAccessToken ? { sharekhanAccessToken } : {}),
+    ...(sharekhanSecureKey ? { sharekhanSecureKey } : {}),
+    ...(sharekhanCustomerId ? { sharekhanCustomerId } : {}),
+    ...(sharekhanChannelUser ? { sharekhanChannelUser } : {}),
+    ...(sharekhanProductType ? { sharekhanProductType } : {}),
     ...(extraParams ? { extraParams } : {}),
     ...(payloadMap ? { payloadMap } : {}),
   };
@@ -651,14 +710,26 @@ function sanitizeStrategy(strategy) {
   const safe = { ...strategy };
   const marketMayaSource =
     safe.marketMaya && typeof safe.marketMaya === "object" ? safe.marketMaya : {};
-  const { token, ...rest } = marketMayaSource;
+  const {
+    token,
+    sharekhanApiKey,
+    sharekhanAccessToken,
+    sharekhanSecureKey,
+    ...rest
+  } = marketMayaSource;
   safe.marketMaya = {
     ...buildDefaultTradeWindowConfig(),
     ...rest,
     ...(token ? { token } : {}),
+    ...(sharekhanApiKey ? { sharekhanApiKey } : {}),
+    ...(sharekhanAccessToken ? { sharekhanAccessToken } : {}),
+    ...(sharekhanSecureKey ? { sharekhanSecureKey } : {}),
     tradeWindowStart: normalizeStoredTime(rest.tradeWindowStart, DEFAULT_TRADE_WINDOW_START),
     tradeWindowEnd: normalizeStoredTime(rest.tradeWindowEnd, DEFAULT_TRADE_WINDOW_END),
     tokenConfigured: Boolean(token),
+    sharekhanConfigured: Boolean(
+      sharekhanApiKey && sharekhanAccessToken && marketMayaSource.sharekhanCustomerId
+    ),
   };
   return safe;
 }
@@ -696,8 +767,24 @@ async function create(req, res) {
   }
 
   const hasToken = Boolean(marketMayaToken || marketMaya?.token || process.env.MARKETMAYA_TOKEN);
-  if (enabled && !hasToken) {
-    throw createHttpError(400, "Market Maya token is required when enabled");
+  const hasSharekhanDirect = Boolean(marketMayaConfig?.sharekhanDirect);
+  const hasSharekhanCreds = Boolean(
+    marketMayaConfig?.sharekhanApiKey &&
+      marketMayaConfig?.sharekhanAccessToken &&
+      marketMayaConfig?.sharekhanCustomerId &&
+      marketMayaConfig?.sharekhanChannelUser
+  );
+  if (enabled && !hasToken && !hasSharekhanDirect) {
+    throw createHttpError(
+      400,
+      "Market Maya token or Sharekhan direct is required when strategy is enabled"
+    );
+  }
+  if (hasSharekhanDirect && !hasSharekhanCreds) {
+    throw createHttpError(
+      400,
+      "Sharekhan API Key, Access Token, Customer ID, and Login ID (channelUser) are required on this strategy"
+    );
   }
 
   // Telegram chat ID is managed via bot subscription tokens; do not require it here.
@@ -789,8 +876,36 @@ async function update(req, res) {
     marketMayaConfig?.token ||
     existing.marketMaya?.token ||
     process.env.MARKETMAYA_TOKEN;
-  if (enabled && !tokenAfter) {
-    throw createHttpError(400, "Market Maya token is required when enabled");
+  const sharekhanAfter = Boolean(
+    marketMayaConfig?.sharekhanDirect ?? existing.marketMaya?.sharekhanDirect
+  );
+  const sharekhanApiKeyAfter =
+    marketMayaConfig?.sharekhanApiKey || existing.marketMaya?.sharekhanApiKey;
+  const sharekhanAccessTokenAfter =
+    marketMayaConfig?.sharekhanAccessToken || existing.marketMaya?.sharekhanAccessToken;
+  const sharekhanCustomerIdAfter =
+    marketMayaConfig?.sharekhanCustomerId || existing.marketMaya?.sharekhanCustomerId;
+  const sharekhanChannelUserAfter =
+    marketMayaConfig?.sharekhanChannelUser || existing.marketMaya?.sharekhanChannelUser;
+  if (enabled && !tokenAfter && !sharekhanAfter) {
+    throw createHttpError(
+      400,
+      "Market Maya token or Sharekhan direct is required when strategy is enabled"
+    );
+  }
+  if (
+    sharekhanAfter &&
+    !(
+      sharekhanApiKeyAfter &&
+      sharekhanAccessTokenAfter &&
+      sharekhanCustomerIdAfter &&
+      sharekhanChannelUserAfter
+    )
+  ) {
+    throw createHttpError(
+      400,
+      "Sharekhan API Key, Access Token, Customer ID, and Login ID (channelUser) are required on this strategy"
+    );
   }
 
   const now = new Date().toISOString();
@@ -821,7 +936,7 @@ async function update(req, res) {
       setKeys.add("token");
     }
     marketMayaClear.forEach((key) => {
-      if (!key || key === "token" || setKeys.has(key)) return;
+      if (!key || setKeys.has(key)) return;
       unset[`marketMaya.${key}`] = "";
     });
   }

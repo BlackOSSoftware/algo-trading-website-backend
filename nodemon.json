@@ -1,0 +1,9 @@
+{
+  "watch": ["index.js", "src"],
+  "ext": "js,mjs,cjs,json",
+  "ignore": [
+    "storage/**",
+    "node_modules/**",
+    "**/*.test.js"
+  ]
+}

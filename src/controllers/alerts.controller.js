@@ -1,6 +1,6 @@
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
-const { listAlerts } = require("../services/alert.service");
+const { listAlerts, clearAlerts } = require("../services/alert.service");
 
 async function list(req, res) {
   const userId = req.user?.sub;
@@ -17,4 +17,14 @@ async function list(req, res) {
   sendJson(res, 200, { ok: true, alerts });
 }
 
-module.exports = { list };
+async function clear(req, res) {
+  const userId = req.user?.sub;
+  if (!userId) {
+    throw createHttpError(401, "Unauthorized");
+  }
+
+  const result = await clearAlerts(userId);
+  sendJson(res, 200, { ok: true, deletedCount: result.deletedCount || 0 });
+}
+
+module.exports = { list, clear };

@@ -42,6 +42,11 @@ async function connectMongo() {
   await db.collection("plans").createIndex({ active: 1 });
   await db.collection("plan_requests").createIndex({ userId: 1, createdAt: -1 });
   await db.collection("plan_requests").createIndex({ status: 1, createdAt: -1 });
+  await db.collection("mstock_instruments").createIndex({ symbol: 1 });
+  await db.collection("mstock_instruments").createIndex({ exchange: 1, symbol: 1 });
+  await db.collection("mstock_instruments").createIndex({ instrumentType: 1 });
+  await db.collection("mstock_instruments").createIndex({ searchText: 1 });
+  await db.collection("mstock_instruments").createIndex({ syncedAt: -1 });
 
   return db;
 }

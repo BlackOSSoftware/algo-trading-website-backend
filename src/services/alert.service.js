@@ -1,7 +1,14 @@
-const { findEventsByUser } = require("../models/webhookEvent.model");
+const {
+  findEventsByUser,
+  deleteEventsByUser,
+} = require("../models/webhookEvent.model");
 
 async function listAlerts(userId, strategyId, limit) {
   return findEventsByUser(userId, strategyId, limit);
 }
 
-module.exports = { listAlerts };
+async function clearAlerts(userId) {
+  return deleteEventsByUser(userId);
+}
+
+module.exports = { listAlerts, clearAlerts };

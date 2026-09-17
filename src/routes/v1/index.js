@@ -24,7 +24,10 @@ const {
   symbolPosition,
   symbolPositionAdmin,
 } = require("../../controllers/marketMaya.controller");
-const { list: listAlerts } = require("../../controllers/alerts.controller");
+const {
+  list: listAlerts,
+  clear: clearAlerts,
+} = require("../../controllers/alerts.controller");
 const { webhook: telegramWebhook } = require("../../controllers/telegram.controller");
 const { createToken, listTokens } = require("../../controllers/telegramToken.controller");
 const { submitContactRequest } = require("../../controllers/contact.controller");
@@ -64,7 +67,20 @@ const {
   getSavedDefaultsAdmin,
   testMarketDataAdmin,
   updateSavedDefaultsAdmin,
+  syncInstrumentsAdmin,
+  getInstrumentStatsAdmin,
+  searchInstrumentsAdmin,
+  searchInstruments,
 } = require("../../controllers/mstock.controller");
+const {
+  placeSharekhanTrade,
+  getSharekhanLoginUrl,
+  saveSharekhanLoginSession,
+  getSharekhanLoginSession,
+  exchangeSharekhanToken,
+  completeSharekhanLogin,
+  consumeSharekhanLoginResult,
+} = require("../../controllers/sharekhan.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 function registerV1Routes(router) {
@@ -89,6 +105,7 @@ function registerV1Routes(router) {
   router.post("/api/v1/marketmaya/getsymbolposition", requireAuth(symbolPosition));
 
   router.get("/api/v1/alerts", requireAuth(listAlerts));
+  router.post("/api/v1/alerts/clear", requireAuth(clearAlerts));
 
   router.post("/api/v1/telegram/webhook", telegramWebhook);
   router.post("/api/v1/telegram/token", requireAuth(createToken));
@@ -130,6 +147,17 @@ function registerV1Routes(router) {
   router.get("/api/v1/admin/mstock/defaults", requireAdmin(getSavedDefaultsAdmin));
   router.post("/api/v1/admin/mstock/test-market-data", requireAdmin(testMarketDataAdmin));
   router.post("/api/v1/admin/mstock/defaults", requireAdmin(updateSavedDefaultsAdmin));
+  router.post("/api/v1/admin/mstock/instruments/sync", requireAdmin(syncInstrumentsAdmin));
+  router.get("/api/v1/admin/mstock/instruments/stats", requireAdmin(getInstrumentStatsAdmin));
+  router.get("/api/v1/admin/mstock/instruments/search", requireAdmin(searchInstrumentsAdmin));
+  router.get("/api/v1/mstock/instruments/search", requireAuth(searchInstruments));
+  router.post("/api/v1/sharekhan/trade", requireAuth(placeSharekhanTrade));
+  router.post("/api/v1/sharekhan/login-url", requireAuth(getSharekhanLoginUrl));
+  router.post("/api/v1/sharekhan/login-prep", requireAuth(saveSharekhanLoginSession));
+  router.get("/api/v1/sharekhan/login-prep", requireAuth(getSharekhanLoginSession));
+  router.post("/api/v1/sharekhan/access-token", requireAuth(exchangeSharekhanToken));
+  router.post("/api/v1/sharekhan/complete-login", requireAuth(completeSharekhanLogin));
+  router.get("/api/v1/sharekhan/login-result", requireAuth(consumeSharekhanLoginResult));
 }
 
 module.exports = { registerV1Routes };

@@ -1,5 +1,10 @@
 const https = require("https");
 const { getGlobalMStockConfig } = require("../models/mstockConfig.model");
+const {
+  replaceAllInstruments,
+  countInstruments,
+  searchInstruments,
+} = require("../models/mstockInstrument.model");
 const DEFAULT_BASE_URL = "https://api.mstock.trade";
 const DEFAULT_TIME_ZONE =
   normalizeString(process.env.MSTOCK_TIME_ZONE || process.env.APP_TIME_ZONE) || "Asia/Kolkata";
@@ -646,30 +651,56 @@ async function fetchTypeBQuote({
 
 async function fetchTypeBScriptMaster({ apiKey, authToken }) {
   const url = `${DEFAULT_BASE_URL}/openapi/typeb/instruments/OpenAPIScripMaster`;
-  const response = await fetchMStock(url, {
-    method: "GET",
-    headers: buildHeaders({
-      apiType: "typeB",
-      apiKey,
-      authToken,
-    }),
-  });
+  const resolvedApiKey = normalizeString(apiKey);
+  const resolvedAuthToken = normalizeString(authToken);
 
-  if (!response.ok) {
-    return response;
+  // Large payload — use a longer timeout than normal market-data calls.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120000);
+
+  try {
+    const headers = resolvedAuthToken
+      ? buildHeaders({
+          apiType: "typeB",
+          apiKey: resolvedApiKey,
+          authToken: resolvedAuthToken,
+        })
+      : {
+          Accept: "application/json, text/plain, */*",
+          "X-Mirae-Version": "1",
+          ...(resolvedApiKey ? { "X-PrivateKey": resolvedApiKey } : {}),
+        };
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+
+    const rawText = await response.text().catch(() => "");
+    let payload = rawText;
+    try {
+      payload = rawText ? JSON.parse(rawText) : [];
+    } catch {
+      payload = rawText;
+    }
+
+    const entries = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : [];
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      entries,
+      rawLength: rawText.length,
+    };
+  } finally {
+    clearTimeout(timeout);
   }
-
-  const payload = response.payload;
-  const entries = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.data)
-      ? payload.data
-      : [];
-
-  return {
-    ...response,
-    entries,
-  };
 }
 
 function buildTypeBEqIndex(entries) {
@@ -1085,6 +1116,41 @@ async function testMStockMarketData({
   };
 }
 
+async function syncMStockInstrumentMaster() {
+  const globalConfig = (await getGlobalMStockConfig().catch(() => null)) || {};
+  const apiKey = normalizeString(globalConfig.apiKey || process.env.MSTOCK_API_KEY);
+  const authToken = normalizeString(
+    globalConfig.authToken || process.env.MSTOCK_AUTH_TOKEN
+  );
+
+  if (!apiKey) {
+    return { ok: false, error: "mStock API key is not configured." };
+  }
+
+  const response = await fetchTypeBScriptMaster({ apiKey, authToken });
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      error: extractErrorMessage(response.payload, response.status),
+    };
+  }
+
+  const result = await replaceAllInstruments(response.entries || []);
+  return {
+    ok: true,
+    ...result,
+  };
+}
+
+async function searchMStockInstruments(query, options = {}) {
+  return searchInstruments(query, options);
+}
+
+async function getMStockInstrumentCount() {
+  return countInstruments();
+}
+
 module.exports = {
   normalizeApiType,
   normalizeInterval,
@@ -1093,4 +1159,8 @@ module.exports = {
   typeBConnectLogin,
   typeBSessionToken,
   typeBVerifyTotp,
+  fetchTypeBScriptMaster,
+  syncMStockInstrumentMaster,
+  searchMStockInstruments,
+  getMStockInstrumentCount,
 };

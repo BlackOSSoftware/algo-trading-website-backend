@@ -17,9 +17,10 @@ const EXIT_CALL_TYPES = new Set([
   "PARTIAL BUY EXIT",
   "PARTIAL SELL EXIT",
 ]);
+// Market Maya REST API no longer accepts order_type/price (MARKET/LIMIT).
+// Sending order_type=MARKET was routing trades as pseudo/paper instead of live.
+const REMOVED_TRADE_PARAM_KEYS = ["order_type", "price"];
 const EXIT_ONLY_PARAM_KEYS = [
-  "order_type",
-  "price",
   "qty_distribution",
   "qty_value",
   "target_by",
@@ -295,18 +296,9 @@ function normalizeAndValidateTradeParams(inputParams) {
     }
   }
 
-  if (!isExitTrade) {
-    const orderTypeMode = normalizeMode(sanitizedParams.order_type || "MARKET", {
-      market: "MARKET",
-      limit: "LIMIT",
-    });
-    if (!orderTypeMode) {
-      return { ok: false, error: "Invalid order_type. Use MARKET or LIMIT." };
-    }
-    sanitizedParams.order_type = orderTypeMode;
-  } else {
-    delete sanitizedParams.order_type;
-    delete sanitizedParams.price;
+  // Official REST docs no longer include order_type/price — always strip them.
+  for (const key of REMOVED_TRADE_PARAM_KEYS) {
+    delete sanitizedParams[key];
   }
 
   const qtyMode = normalizeMode(sanitizedParams.qty_distribution, {
@@ -320,11 +312,15 @@ function normalizeAndValidateTradeParams(inputParams) {
     "capitalrisk(%)": "Capital Risk(%)",
     "capital risk": "Capital Risk(%)",
     capitalrisk: "Capital Risk(%)",
+    "allocation method 1": "Allocation Method 1",
+    allocationmethod1: "Allocation Method 1",
+    allocation: "Allocation Method 1",
   });
   if (sanitizedParams.qty_distribution !== undefined && !qtyMode) {
     return {
       ok: false,
-      error: "Invalid qty_distribution. Use Fix, Capital(%), or Capital Risk(%).",
+      error:
+        "Invalid qty_distribution. Use Fix, Capital(%), Capital Risk(%), or Allocation Method 1.",
     };
   }
   if (qtyMode) sanitizedParams.qty_distribution = qtyMode;
@@ -409,16 +405,6 @@ function normalizeAndValidateTradeParams(inputParams) {
       }
       sanitizedParams.qty_value = formatNumber(qtyValue);
     }
-  }
-
-  if (sanitizedParams.order_type === "LIMIT") {
-    const priceValue = parsePositiveNumber(sanitizedParams.price);
-    if (!priceValue) {
-      return { ok: false, error: "price is required and must be positive for LIMIT order." };
-    }
-    sanitizedParams.price = formatNumber(priceValue);
-  } else {
-    delete sanitizedParams.price;
   }
 
   const trailEnabled = isTruthy(sanitizedParams.is_trail_sl);
@@ -640,6 +626,7 @@ async function customTrade({ token, params, execute, baseUrl }) {
     return buildPreview({ path, token: resolvedToken, params: safeParams, baseUrl });
   }
 
+  const submittedAt = Date.now();
   const url = buildUrl(path, resolvedToken, safeParams, baseUrl);
   const result = await fetchMarketMayaJson(url, getTimeoutMs());
 
@@ -653,10 +640,149 @@ async function customTrade({ token, params, execute, baseUrl }) {
     };
   }
 
+  const broker = await resolveBrokerCallOutcome({
+    token: resolvedToken,
+    params: safeParams,
+    baseUrl,
+    submittedAt,
+  });
+
+  const brokerRejected = isBrokerRejectedStatus(broker.status);
+  const brokerAccepted = isBrokerAcceptedStatus(broker.status);
+  const brokerPending = !brokerRejected && !brokerAccepted;
+  const error = brokerRejected
+    ? broker.remark || `Market Maya ${broker.status || "Rejected"}`
+    : brokerPending
+      ? broker.remark ||
+        `Market Maya status: ${broker.status || "Waiting"}`
+      : null;
+
   return {
-    ok: true,
+    ok: brokerAccepted,
     dryRun: false,
     result,
+    brokerStatus: broker.status || (brokerAccepted ? "Accepted" : "Pending"),
+    brokerRemark: broker.remark || "",
+    brokerTime: broker.time || "",
+    brokerMatched: Boolean(broker.matched),
+    error,
+  };
+}
+
+function normalizeBrokerSymbol(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/-(EQ|FUT|OPT)$/i, "")
+    .replace(/\s+/g, "");
+}
+
+function normalizeBrokerCallType(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, " ");
+}
+
+function isBrokerRejectedStatus(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  return raw.includes("reject") || raw.includes("fail") || raw.includes("error");
+}
+
+function isBrokerAcceptedStatus(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  if (!raw) return false;
+  return (
+    raw.includes("accept") ||
+    raw.includes("execut") ||
+    raw.includes("success") ||
+    raw.includes("complete") ||
+    raw.includes("confirm")
+  );
+}
+
+function isBrokerPendingStatus(status) {
+  const raw = String(status || "").trim().toLowerCase();
+  if (!raw) return true;
+  if (isBrokerAcceptedStatus(raw) || isBrokerRejectedStatus(raw)) return false;
+  return (
+    raw.includes("wait") ||
+    raw.includes("pending") ||
+    raw.includes("process") ||
+    raw.includes("queue") ||
+    raw.includes("open")
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function pickMatchingCallHistoryRow(rows, params, submittedAt) {
+  const wantSymbol = normalizeBrokerSymbol(params.symbol || params.symbol_code);
+  const wantType = normalizeBrokerCallType(params.call_type);
+  const windowMs = 3 * 60 * 1000;
+
+  const candidates = (Array.isArray(rows) ? rows : [])
+    .map((row, index) => {
+      const symbol = normalizeBrokerSymbol(row?.symbol || row?.trading_symbol || row?.symbol_code);
+      const type = normalizeBrokerCallType(row?.type || row?.call_type);
+      const timeRaw = row?.time || row?.created_at || row?.createdAt || "";
+      const timeMs = timeRaw ? Date.parse(String(timeRaw)) : NaN;
+      const symbolOk = !wantSymbol || !symbol || symbol === wantSymbol || symbol.startsWith(wantSymbol) || wantSymbol.startsWith(symbol);
+      const typeOk = !wantType || !type || type === wantType;
+      const freshOk = !Number.isFinite(timeMs) || timeMs + 5000 >= submittedAt - windowMs;
+      return {
+        row,
+        index,
+        score:
+          (symbolOk ? 4 : 0) +
+          (typeOk ? 2 : 0) +
+          (freshOk ? 1 : 0) +
+          (Number.isFinite(timeMs) ? Math.min(1, Math.max(0, 1 - (Date.now() - timeMs) / windowMs)) : 0),
+        timeMs: Number.isFinite(timeMs) ? timeMs : 0,
+      };
+    })
+    .filter((item) => item.score >= 5)
+    .sort((a, b) => b.score - a.score || b.timeMs - a.timeMs || a.index - b.index);
+
+  return candidates[0]?.row || null;
+}
+
+async function resolveBrokerCallOutcome({ token, params, baseUrl, submittedAt }) {
+  const attempts = 10;
+  let lastMatch = null;
+
+  for (let i = 0; i < attempts; i += 1) {
+    await sleep(i === 0 ? 1000 : 1200);
+    const history = await getCallHistory({ token, execute: true, baseUrl });
+    if (!history.ok) continue;
+    const rows = Array.isArray(history.result?.payload) ? history.result.payload : [];
+    const match = pickMatchingCallHistoryRow(rows, params, submittedAt);
+    if (!match) continue;
+
+    lastMatch = {
+      matched: true,
+      status: String(match.status || "").trim(),
+      remark: String(match.remark || match.message || match.close_rejection_note || "").trim(),
+      time: String(match.time || "").trim(),
+      raw: match,
+    };
+
+    // Keep polling while Market Maya is still Waiting/Pending.
+    if (!isBrokerPendingStatus(lastMatch.status)) {
+      return lastMatch;
+    }
+  }
+
+  if (lastMatch) return lastMatch;
+
+  return {
+    matched: false,
+    status: "Pending",
+    remark: "Submitted to Market Maya. Broker accept/reject not found in call history yet.",
+    time: "",
+    raw: null,
   };
 }
 
@@ -725,6 +851,13 @@ function summarizeTradeResultForTelegram(result, max = 180) {
 
   if (!result.ok) {
     return toSafeSnippet(result.error || "Market Maya request failed", max);
+  }
+
+  if (result.brokerStatus) {
+    const status = String(result.brokerStatus).trim();
+    const remark = toSafeSnippet(result.brokerRemark || "", Math.max(40, max - status.length - 2));
+    if (remark) return `${status}: ${remark}`;
+    return status;
   }
 
   const responseMeta = result.result || {};

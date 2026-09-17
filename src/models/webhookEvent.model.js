@@ -76,14 +76,20 @@ async function findEventsByUser(userId, strategyId, limit = 50) {
     .toArray();
 }
 
+function buildUserQuery(userId) {
+  if (!userId) return null;
+  const userRaw = userId instanceof ObjectId ? userId.toString() : String(userId);
+  const userObj = ObjectId.isValid(userRaw) ? new ObjectId(userRaw) : null;
+  return userObj
+    ? { $or: [{ userId: userObj }, { userId: userRaw }] }
+    : { userId: userRaw };
+}
+
 async function deleteEventsByUserAndStrategy(userId, strategyId) {
   if (!userId || !strategyId) return { deletedCount: 0 };
 
-  const userRaw = userId instanceof ObjectId ? userId.toString() : String(userId);
-  const userObj = ObjectId.isValid(userRaw) ? new ObjectId(userRaw) : null;
-  const userQuery = userObj
-    ? { $or: [{ userId: userObj }, { userId: userRaw }] }
-    : { userId: userRaw };
+  const userQuery = buildUserQuery(userId);
+  if (!userQuery) return { deletedCount: 0 };
 
   const raw = strategyId instanceof ObjectId ? strategyId.toString() : String(strategyId);
   const id = ObjectId.isValid(raw) ? new ObjectId(raw) : null;
@@ -94,6 +100,12 @@ async function deleteEventsByUserAndStrategy(userId, strategyId) {
   return webhookEventsCollection().deleteMany({ $and: [userQuery, strategyQuery] });
 }
 
+async function deleteEventsByUser(userId) {
+  const userQuery = buildUserQuery(userId);
+  if (!userQuery) return { deletedCount: 0 };
+  return webhookEventsCollection().deleteMany(userQuery);
+}
+
 module.exports = {
   webhookEventsCollection,
   findWebhookEventById,
@@ -102,4 +114,5 @@ module.exports = {
   findRecentEventByFingerprint,
   findEventsByUser,
   deleteEventsByUserAndStrategy,
+  deleteEventsByUser,
 };

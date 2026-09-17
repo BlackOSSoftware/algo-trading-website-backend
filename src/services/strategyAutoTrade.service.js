@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const { customTrade, getSymbolPosition, resolveToken } = require("./marketMaya.service");
+const { placeSharekhanOrder } = require("./sharekhan.service");
 const { resolveMStockCandlePrice } = require("./mstock.service");
 const {
   parseClockTime,
@@ -13,6 +14,9 @@ const {
 
 const DEFAULT_TRADE_WINDOW_START = "09:15";
 const DEFAULT_TRADE_WINDOW_END = "15:30";
+const DEFAULT_MCX_TRADE_WINDOW_END = "23:30";
+const COMMODITY_SYMBOL_PATTERN =
+  /^(GOLD|GOLDM|GOLDPETAL|SILVER|SILVERM|CRUDEOIL|CRUDEOILM|NATURALGAS|NATGASMINI|COPPER|ALUMINI|ALUMINIUM|ALUMINUM|ZINC|LEAD|NICKEL|MENTHAOIL|COTTON|CAPTAIN|NICKEL|MENTHA)/i;
 const TRADE_WINDOW_TIME_ZONE =
   normalizeString(process.env.TRADE_WINDOW_TIME_ZONE || process.env.APP_TIME_ZONE) ||
   "Asia/Kolkata";
@@ -35,8 +39,6 @@ const EXIT_CALL_TYPES = new Set([
   "PARTIAL SELL EXIT",
 ]);
 const EXIT_ONLY_PARAM_KEYS = [
-  "order_type",
-  "price",
   "qty_distribution",
   "qty_value",
   "target_by",
@@ -107,6 +109,17 @@ function stripExitOnlyParams(params) {
   if (!isExitTradeAction(params?.call_type)) return params;
   const sanitized = { ...(params || {}) };
   EXIT_ONLY_PARAM_KEYS.forEach((key) => {
+    delete sanitized[key];
+  });
+  return sanitized;
+}
+
+// Market Maya no longer accepts these — strip even if present in extraParams/payloadMap.
+const REMOVED_TRADE_PARAM_KEYS = ["order_type", "price"];
+
+function stripRemovedTradeParams(params) {
+  const sanitized = { ...(params || {}) };
+  REMOVED_TRADE_PARAM_KEYS.forEach((key) => {
     delete sanitized[key];
   });
   return sanitized;
@@ -524,6 +537,66 @@ function resolveTriggerPrice(payload, cfg, symbol) {
   return parsedPrices.find((price) => price !== null) ?? null;
 }
 
+function resolvePayloadCandlePrice(payload, cfg, symbol, source) {
+  const field =
+    source === "mstockLow"
+      ? "low"
+      : source === "mstockOpen"
+        ? "open"
+        : source === "mstockClose"
+          ? "close"
+          : "high";
+  const directPrice = normalizePositiveNumber(
+    readFirstPayloadValue(payload, [
+      field,
+      `${field}_price`,
+      `${field}Price`,
+      `candle_${field}`,
+      `candle${field.charAt(0).toUpperCase()}${field.slice(1)}`,
+    ])
+  );
+  if (directPrice) return directPrice;
+
+  const parsedPrices = splitPayloadList(
+    readFirstPayloadValue(payload, [
+      `${field}s`,
+      `${field}_prices`,
+      `${field}Prices`,
+      `candle_${field}s`,
+    ])
+  ).map((value) => normalizePositiveNumber(value));
+  if (!parsedPrices.length) return null;
+
+  const targetSymbol = normalizeString(symbol).toUpperCase();
+  if (targetSymbol) {
+    const symbolIndex = getTriggerPriceSymbolOrder(payload, cfg).findIndex(
+      (item) => normalizeString(item).toUpperCase() === targetSymbol
+    );
+    if (symbolIndex >= 0 && parsedPrices[symbolIndex]) {
+      return parsedPrices[symbolIndex];
+    }
+  }
+
+  return parsedPrices.find((price) => price !== null) ?? null;
+}
+
+function resolvePayloadCandleTime(payload) {
+  return normalizeString(
+    readFirstPayloadValue(payload, [
+      "candle_time",
+      "candleTime",
+      "candle_timestamp",
+      "candleTimestamp",
+      "bar_time",
+      "barTime",
+      "triggered_at",
+      "triggeredAt",
+      "timestamp",
+      "time",
+    ])
+  );
+}
+
 function uniquePreserveOrder(values) {
   const output = [];
   const seen = new Set();
@@ -838,6 +911,86 @@ function getDayRangeIso(dateInput) {
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
+function isCommoditySymbol(symbol) {
+  const raw = toUpper(symbol).replace(/[^A-Z0-9]/g, "");
+  if (!raw) return false;
+  return COMMODITY_SYMBOL_PATTERN.test(raw);
+}
+
+function looksLikeOptionPayload(payload, cfg) {
+  const optionType =
+    toUpper(readFirstPayloadValue(payload, ["option_type", "optionType"])) ||
+    toUpper(cfg?.optionType);
+  if (optionType === "CE" || optionType === "PE") return true;
+  const strike =
+    normalizeString(readFirstPayloadValue(payload, ["strike_price", "strikePrice"])) ||
+    normalizeString(cfg?.strikePrice);
+  const atm =
+    normalizeString(readFirstPayloadValue(payload, ["atm"])) || normalizeString(cfg?.atm);
+  return Boolean(strike || (atm !== "" && atm !== undefined && atm !== null && String(atm).length));
+}
+
+function resolveInstrumentExchangeSegment({
+  exchange,
+  segment,
+  symbol,
+  payload,
+  cfg,
+}) {
+  let nextExchange = exchange;
+  let nextSegment = segment;
+  let remapped = false;
+  let reason = "";
+
+  const commodity = isCommoditySymbol(symbol);
+  const optionLike = looksLikeOptionPayload(payload, cfg);
+  const cfgExchange = toUpper(cfg?.exchange);
+  const cfgSegment = toUpper(cfg?.segment);
+  const payloadExchange = toUpper(
+    readFirstPayloadValue(payload, ["exchange", "Exchange"])
+  );
+  const payloadSegment = toUpper(
+    readFirstPayloadValue(payload, ["segment", "Segment"])
+  );
+
+  // Explicit payload wins; otherwise fix common EQ misconfig for commodity/options.
+  if (!payloadExchange && !payloadSegment) {
+    if (commodity && (nextExchange === "NSE" || nextExchange === "BSE" || !nextExchange)) {
+      if (!cfgExchange || cfgExchange === "NSE" || cfgExchange === "BSE") {
+        nextExchange = "MCX";
+        nextSegment =
+          cfgSegment === "OPT" || optionLike ? "OPT" : nextSegment === "OPT" ? "OPT" : "FUT";
+        remapped = true;
+        reason = "Commodity symbol auto-mapped to MCX";
+      }
+    } else if (
+      optionLike &&
+      (nextSegment === "EQ" || !nextSegment) &&
+      (!cfgSegment || cfgSegment === "EQ")
+    ) {
+      nextSegment = "OPT";
+      if (nextExchange === "NSE" || nextExchange === "BSE" || !nextExchange) {
+        nextExchange = commodity ? "MCX" : "NFO";
+      }
+      remapped = true;
+      reason = "Option fields auto-mapped to OPT segment";
+    }
+  }
+
+  if (nextExchange === "MCX" && nextSegment === "EQ") {
+    nextSegment = optionLike || cfgSegment === "OPT" ? "OPT" : "FUT";
+    remapped = true;
+    reason = reason || "MCX EQ remapped to derivative segment";
+  }
+
+  return {
+    exchange: nextExchange || "NSE",
+    segment: nextSegment || "EQ",
+    remapped,
+    reason,
+  };
+}
+
 function getStrategyIds(strategy) {
   const userId = strategy?.userId?.toString ? strategy.userId.toString() : String(strategy?.userId || "");
   const strategyId = strategy?._id?.toString ? strategy._id.toString() : String(strategy?._id || "");
@@ -851,15 +1004,25 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       ? cfg.extraParams
       : {};
 
-  const exchange =
+  const exchangeRaw =
     toUpper(readFirstPayloadValue(payload, ["exchange", "Exchange"])) ||
     toUpper(cfg.exchange) ||
     "NSE";
 
-  const segment =
+  const segmentRaw =
     toUpper(readFirstPayloadValue(payload, ["segment", "Segment"])) ||
     toUpper(cfg.segment) ||
     "EQ";
+
+  const instrument = resolveInstrumentExchangeSegment({
+    exchange: exchangeRaw,
+    segment: segmentRaw,
+    symbol: symbol || symbolCode || "",
+    payload,
+    cfg,
+  });
+  const exchange = instrument.exchange;
+  const segment = instrument.segment;
 
   const callTypeKey = normalizeString(cfg.callTypeKey) || "call_type";
   const callType =
@@ -872,6 +1035,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
     ? ""
     : toUpper(readFirstPayloadValue(payload, ["order_type", "orderType"])) ||
       toUpper(cfg.orderType);
+  // Kept only for Capital(%) qty sizing / internal buffers — never sent to Market Maya.
   const limitPriceSourceConfigured = exitTrade
     ? ""
     : normalizeLimitPriceSource(
@@ -891,13 +1055,17 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   let dynamicSourcePrice = payloadTriggerPrice;
   let dynamicSourceLabel = "trigger price";
   let dynamicSourceError = "";
-
-  if (
+  let dynamicSourceFallback = false;
+  let dynamicSourceCandleTime = "";
+  const isMStockCandlePriceSource =
     limitPriceSource === "mstockHigh" ||
     limitPriceSource === "mstockLow" ||
     limitPriceSource === "mstockOpen" ||
-    limitPriceSource === "mstockClose"
-  ) {
+    limitPriceSource === "mstockClose";
+  const mStockCandleInterval = normalizeString(cfg.mStockInterval) || "";
+  const mStockCandleOffset = normalizePositiveInt(cfg.mStockCandleOffset) || 1;
+
+  if (isMStockCandlePriceSource) {
     const mStockResult = await resolveMStockCandlePrice({
       config: cfg,
       source: limitPriceSource,
@@ -909,8 +1077,14 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
     if (mStockResult.ok) {
       dynamicSourcePrice = Number(mStockResult.price);
       dynamicSourceLabel = `mStock candle ${mStockResult.priceField}`;
+      dynamicSourceCandleTime = normalizeString(mStockResult.candle?.timestamp);
     } else {
-      dynamicSourcePrice = null;
+      dynamicSourcePrice = resolvePayloadCandlePrice(
+        payload,
+        cfg,
+        symbol || symbolCode || "",
+        limitPriceSource
+      );
       dynamicSourceLabel =
         limitPriceSource === "mstockLow"
           ? "mStock candle low"
@@ -919,7 +1093,13 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
             : limitPriceSource === "mstockClose"
               ? "mStock candle close"
               : "mStock candle high";
-      dynamicSourceError = mStockResult.error || `${dynamicSourceLabel} could not be fetched`;
+      if (dynamicSourcePrice) {
+        dynamicSourceLabel = dynamicSourceLabel.replace(/^mStock/, "webhook");
+        dynamicSourceFallback = true;
+        dynamicSourceCandleTime = resolvePayloadCandleTime(payload);
+      } else {
+        dynamicSourceError = mStockResult.error || `${dynamicSourceLabel} could not be fetched`;
+      }
     }
   }
 
@@ -1061,13 +1241,26 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   return {
     cfg,
     buildError,
+    priceDetails: isMStockCandlePriceSource
+      ? {
+          source: limitPriceSource,
+          label: dynamicSourceLabel,
+          sourcePrice:
+            Number.isFinite(dynamicSourcePrice) && dynamicSourcePrice > 0
+              ? formatNumber(dynamicSourcePrice)
+              : null,
+          tradePrice: priceForLimitOrder || null,
+          fallback: dynamicSourceFallback,
+          interval: mStockCandleInterval || null,
+          candleOffset: mStockCandleOffset,
+          candleTime: dynamicSourceCandleTime || null,
+        }
+      : null,
     base: {
       ...extraParams,
       exchange,
       segment,
       ...(callType ? { call_type: callType } : {}),
-      ...(orderType ? { order_type: orderType } : {}),
-      ...(orderType === "LIMIT" && priceForLimitOrder ? { price: priceForLimitOrder } : {}),
       ...(resolvedQtyDistribution ? { qty_distribution: resolvedQtyDistribution } : {}),
       ...(resolvedQtyValue ? { qty_value: resolvedQtyValue } : {}),
       ...(targetBy ? { target_by: targetBy } : {}),
@@ -1115,8 +1308,13 @@ function applyDerivativeDefaults(params, payload, cfg) {
       delete merged.expiry;
     } else {
       const contract =
-        toUpper(readFirstPayloadValue(payload, ["contract"])) || toUpper(cfg.contract);
-      const expiry = toUpper(readFirstPayloadValue(payload, ["expiry"])) || toUpper(cfg.expiry);
+        toUpper(readFirstPayloadValue(payload, ["contract"])) ||
+        toUpper(cfg.contract) ||
+        "NEAR";
+      const expiry =
+        toUpper(readFirstPayloadValue(payload, ["expiry"])) ||
+        toUpper(cfg.expiry) ||
+        (segment === "FUT" ? "MONTHLY" : "WEEKLY");
       if (contract) merged.contract = contract;
       if (expiry) merged.expiry = expiry;
     }
@@ -1129,19 +1327,22 @@ function applyDerivativeDefaults(params, payload, cfg) {
   if (segment === "OPT") {
     const optionType =
       toUpper(readFirstPayloadValue(payload, ["option_type", "optionType"])) ||
-      toUpper(cfg.optionType);
+      toUpper(cfg.optionType) ||
+      "CE";
     if (optionType) merged.option_type = optionType;
 
     const strikePrice =
       normalizeString(readFirstPayloadValue(payload, ["strike_price", "strikePrice"])) ||
       normalizeString(cfg.strikePrice);
     const atm =
-      normalizeString(readFirstPayloadValue(payload, ["atm"])) || normalizeString(cfg.atm);
+      normalizeString(readFirstPayloadValue(payload, ["atm"])) ||
+      normalizeString(cfg.atm) ||
+      "0";
 
     if (strikePrice) {
       merged.strike_price = strikePrice;
       delete merged.atm;
-    } else if (atm) {
+    } else {
       merged.atm = atm;
       delete merged.strike_price;
     }
@@ -1179,7 +1380,7 @@ function extractSymbolsFromPayload(payload, cfg) {
 }
 
 async function buildTradeParams({ strategy, payload, symbol, symbolCode, receivedAt }) {
-  const { cfg, base, buildError } = await buildBaseParams({
+  const { cfg, base, buildError, priceDetails } = await buildBaseParams({
     strategy,
     payload,
     symbol,
@@ -1191,6 +1392,7 @@ async function buildTradeParams({ strategy, payload, symbol, symbolCode, receive
   params = applyPayloadMap(params, payload, cfg);
   params = applyDerivativeDefaults(params, payload, cfg);
   params = stripExitOnlyParams(params);
+  params = stripRemovedTradeParams(params);
 
   if (symbolCode) {
     params.symbol_code = symbolCode;
@@ -1207,7 +1409,13 @@ async function buildTradeParams({ strategy, payload, symbol, symbolCode, receive
     delete params.symbol_code;
   }
 
-  return { params, buildError };
+  return {
+    params,
+    buildError,
+    priceDetails: priceDetails
+      ? { ...priceDetails, tradePrice: params.price || priceDetails.tradePrice || null }
+      : null,
+  };
 }
 
 function validateMinimumParams(params) {
@@ -1307,18 +1515,58 @@ function validateMinimumParams(params) {
   return null;
 }
 
-async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
-  const cfg = strategy?.marketMaya && typeof strategy.marketMaya === "object" ? strategy.marketMaya : {};
+async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharekhanConfig = null }) {
+  const strategyCfg = strategy?.marketMaya && typeof strategy.marketMaya === "object" ? strategy.marketMaya : {};
+  const savedSharekhan =
+    sharekhanConfig && typeof sharekhanConfig === "object" ? sharekhanConfig : {};
+  const cfg = {
+    ...strategyCfg,
+    ...(strategyCfg.sharekhanApiKey ? {} : { sharekhanApiKey: savedSharekhan.apiKey }),
+    ...(strategyCfg.sharekhanAccessToken ? {} : { sharekhanAccessToken: savedSharekhan.accessToken }),
+    ...(strategyCfg.sharekhanCustomerId ? {} : { sharekhanCustomerId: savedSharekhan.customerId }),
+    ...(strategyCfg.sharekhanChannelUser
+      ? {}
+      : { sharekhanChannelUser: savedSharekhan.channelUser }),
+    ...(strategyCfg.sharekhanProductType ? {} : { sharekhanProductType: savedSharekhan.productType }),
+  };
   const execute = Boolean(strategy?.enabled) && !Boolean(cfg.dryRun);
   const baseUrl = normalizeString(strategy?.marketMayaUrl);
   const token = resolveToken(cfg.token);
-  if (!token) {
-    return {
-      ok: false,
-      skipped: true,
-      execute,
-      error: "Market Maya token is not configured (strategy or env)",
-    };
+  const sharekhanDirect = Boolean(cfg.sharekhanDirect);
+  const marketMayaEnabled =
+    cfg.marketMayaEnabled === undefined || cfg.marketMayaEnabled === null
+      ? Boolean(token)
+      : Boolean(cfg.marketMayaEnabled);
+  const sendMarketMaya = marketMayaEnabled && Boolean(token);
+  const sendSharekhan =
+    sharekhanDirect &&
+    Boolean(
+      normalizeString(cfg.sharekhanApiKey) &&
+        normalizeString(cfg.sharekhanAccessToken) &&
+        normalizeString(cfg.sharekhanCustomerId) &&
+        normalizeString(cfg.sharekhanChannelUser || cfg.sharekhanCustomerId)
+    );
+  const skippedResult = (error, extra = {}) => ({
+    ok: false,
+    skipped: true,
+    execute,
+    error,
+    marketMayaEnabled: sendMarketMaya,
+    sharekhanEnabled: sendSharekhan,
+    total: 0,
+    successCount: 0,
+    failureCount: 0,
+    trades: [],
+    ...extra,
+  });
+
+  if (!sendMarketMaya && !sendSharekhan) {
+    return skippedResult(
+      sharekhanDirect
+        ? "Sharekhan direct is ON but API Key / Access Token / Customer ID are missing on this strategy"
+        : "No trade destination configured. Add Market Maya token and/or enable Sharekhan with your credentials.",
+      { sharekhanEnabled: sharekhanDirect }
+    );
   }
 
   const symbolMode = resolveSymbolMode(cfg);
@@ -1336,7 +1584,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
   );
   const tradeWindowEnd = normalizeTradeWindowValue(
     cfg.tradeWindowEnd,
-    DEFAULT_TRADE_WINDOW_END
+    toUpper(cfg.exchange) === "MCX" ? DEFAULT_MCX_TRADE_WINDOW_END : DEFAULT_TRADE_WINDOW_END
   );
   const tradeWindowReferenceDate = resolveTradeWindowReferenceDate(receivedAt, payload);
 
@@ -1347,16 +1595,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
       tradeWindowEnd
     );
     if (!windowCheck.allowed) {
-      return {
-        ok: false,
-        skipped: true,
-        execute,
-        error: windowCheck.reason || "Trade window closed",
-        total: 0,
-        successCount: 0,
-        failureCount: 0,
-        trades: [],
-      };
+      return skippedResult(windowCheck.reason || "Trade window closed");
     }
   }
 
@@ -1367,16 +1606,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     const usedCount = await countTradesByStrategyInRange(strategyId, startIso, endIso, true);
     remainingTrades = Math.max(dailyTradeLimit - usedCount, 0);
     if (remainingTrades <= 0) {
-      return {
-        ok: false,
-        skipped: true,
-        execute,
-        error: `Daily trade limit reached (${dailyTradeLimit})`,
-        total: 0,
-        successCount: 0,
-        failureCount: 0,
-        trades: [],
-      };
+      return skippedResult(`Daily trade limit reached (${dailyTradeLimit})`);
     }
   }
 
@@ -1386,12 +1616,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     remainingTrades === null ? targets : targets.slice(0, Math.max(0, remainingTrades));
 
   if (limitedTargets.length === 0) {
-    return {
-      ok: false,
-      skipped: true,
-      execute,
-      error: "No symbol found in webhook payload or fixed stocks list (symbol/symbol_code/stocks)",
-    };
+    return skippedResult("No symbol found in webhook payload or fixed stocks list (symbol/symbol_code/stocks)");
   }
 
   const requestedCallType = resolveRequestedCallType(payload, cfg);
@@ -1413,17 +1638,9 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
         const skippedSymbols = exitFilter.skippedTargets
           .map((target) => formatTargetLabel(target))
           .filter(Boolean);
-        return {
-          ok: false,
-          skipped: true,
-          execute,
-          error: exitFilter.noMatchReason || "No matching open position found for exit signal",
-          total: 0,
-          successCount: 0,
-          failureCount: 0,
-          trades: [],
+        return skippedResult(exitFilter.noMatchReason || "No matching open position found for exit signal", {
           skippedSymbols,
-        };
+        });
       }
     }
   }
@@ -1452,6 +1669,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
         symbolCode: target.symbolCode || "",
         orderType: params.order_type || null,
         price: params.price || null,
+        priceDetails: built.priceDetails || null,
         params,
       };
       trades.push(entry);
@@ -1473,31 +1691,84 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
       continue;
     }
 
-    const result = await customTrade({ token, params, execute, baseUrl });
-    trades.push({
+    const tradeEntryBase = {
       symbol: target.symbol || "",
       symbolCode: target.symbolCode || "",
       orderType: params.order_type || null,
       price: params.price || null,
+      priceDetails: built.priceDetails || null,
       params,
-      ...result,
-    });
+    };
 
-    await insertMarketMayaTrade({
-      id: crypto.randomUUID(),
-      userId,
-      strategyId,
-      strategyName: strategy?.name || "",
-      receivedAt: receivedAt || now,
-      createdAt: now,
-      execute,
-      symbol: target.symbol || "",
-      symbolCode: target.symbolCode || "",
-      params,
-      response: result,
-      ok: Boolean(result.ok),
-      error: result.ok ? null : result.error || "Market Maya request failed",
-    });
+    let marketMayaResult = null;
+    if (sendMarketMaya) {
+      marketMayaResult = await customTrade({ token, params, execute, baseUrl });
+      trades.push({
+        ...tradeEntryBase,
+        broker: "marketMaya",
+        ...marketMayaResult,
+      });
+
+      await insertMarketMayaTrade({
+        id: crypto.randomUUID(),
+        userId,
+        strategyId,
+        strategyName: strategy?.name || "",
+        receivedAt: receivedAt || now,
+        createdAt: now,
+        execute,
+        symbol: target.symbol || "",
+        symbolCode: target.symbolCode || "",
+        params,
+        response: marketMayaResult,
+        ok: Boolean(marketMayaResult.ok),
+        error: marketMayaResult.ok
+          ? null
+          : marketMayaResult.error || "Market Maya request failed",
+      });
+    }
+
+    if (sendSharekhan) {
+      const sharekhanResult = await placeSharekhanOrder({
+        apiKey: cfg.sharekhanApiKey,
+        accessToken: cfg.sharekhanAccessToken,
+        customerId: cfg.sharekhanCustomerId,
+        channelUser: cfg.sharekhanChannelUser || cfg.sharekhanCustomerId,
+        execute,
+        exchange: params.exchange,
+        segment: params.segment,
+        symbol: target.symbol || params.symbol,
+        symbolToken: target.symbolCode || params.symbol_code,
+        callType: params.call_type,
+        quantity: params.qty_value || "1",
+        productType: cfg.sharekhanProductType,
+        price: "0",
+      });
+
+      trades.push({
+        ...tradeEntryBase,
+        broker: "sharekhan",
+        ...sharekhanResult,
+      });
+
+      await insertMarketMayaTrade({
+        id: crypto.randomUUID(),
+        userId,
+        strategyId,
+        strategyName: strategy?.name || "",
+        receivedAt: receivedAt || now,
+        createdAt: now,
+        execute,
+        symbol: target.symbol || "",
+        symbolCode: target.symbolCode || "",
+        params: { ...params, broker: "sharekhan" },
+        response: sharekhanResult,
+        ok: Boolean(sharekhanResult.ok),
+        error: sharekhanResult.ok
+          ? null
+          : sharekhanResult.error || "Sharekhan request failed",
+      });
+    }
   }
 
   const successCount = trades.filter((t) => t && t.ok).length;
@@ -1510,6 +1781,8 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt }) {
     total: trades.length,
     successCount,
     failureCount,
+    marketMayaEnabled: sendMarketMaya,
+    sharekhanEnabled: sendSharekhan,
     ...(exitFilterWarning ? { warning: exitFilterWarning } : {}),
     trades,
   };
