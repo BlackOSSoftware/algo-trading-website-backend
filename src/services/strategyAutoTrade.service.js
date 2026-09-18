@@ -1261,6 +1261,8 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       exchange,
       segment,
       ...(callType ? { call_type: callType } : {}),
+      ...(orderType ? { order_type: orderType } : {}),
+      ...(priceForLimitOrder ? { price: priceForLimitOrder } : {}),
       ...(resolvedQtyDistribution ? { qty_distribution: resolvedQtyDistribution } : {}),
       ...(resolvedQtyValue ? { qty_value: resolvedQtyValue } : {}),
       ...(targetBy ? { target_by: targetBy } : {}),
@@ -1392,7 +1394,7 @@ async function buildTradeParams({ strategy, payload, symbol, symbolCode, receive
   params = applyPayloadMap(params, payload, cfg);
   params = applyDerivativeDefaults(params, payload, cfg);
   params = stripExitOnlyParams(params);
-  params = stripRemovedTradeParams(params);
+  // Keep order_type/price for Sharekhan LIMIT; Market Maya call strips them separately.
 
   if (symbolCode) {
     params.symbol_code = symbolCode;
@@ -1702,7 +1704,12 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
 
     let marketMayaResult = null;
     if (sendMarketMaya) {
-      marketMayaResult = await customTrade({ token, params, execute, baseUrl });
+      marketMayaResult = await customTrade({
+        token,
+        params: stripRemovedTradeParams(params),
+        execute,
+        baseUrl,
+      });
       trades.push({
         ...tradeEntryBase,
         broker: "marketMaya",
@@ -1719,7 +1726,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
         execute,
         symbol: target.symbol || "",
         symbolCode: target.symbolCode || "",
-        params,
+        params: stripRemovedTradeParams(params),
         response: marketMayaResult,
         ok: Boolean(marketMayaResult.ok),
         error: marketMayaResult.ok
@@ -1729,45 +1736,88 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
     }
 
     if (sendSharekhan) {
-      const sharekhanResult = await placeSharekhanOrder({
-        apiKey: cfg.sharekhanApiKey,
-        accessToken: cfg.sharekhanAccessToken,
-        customerId: cfg.sharekhanCustomerId,
-        channelUser: cfg.sharekhanChannelUser || cfg.sharekhanCustomerId,
-        execute,
-        exchange: params.exchange,
-        segment: params.segment,
-        symbol: target.symbol || params.symbol,
-        symbolToken: target.symbolCode || params.symbol_code,
-        callType: params.call_type,
-        quantity: params.qty_value || "1",
-        productType: cfg.sharekhanProductType,
-        price: "0",
-      });
+      const sharekhanIsLimit = String(params.order_type || "").toUpperCase() === "LIMIT";
+      const sharekhanLimitPrice = String(params.price || "").trim();
+      const sharekhanPrice =
+        sharekhanIsLimit && sharekhanLimitPrice && sharekhanLimitPrice !== "0"
+          ? sharekhanLimitPrice
+          : "0";
 
-      trades.push({
-        ...tradeEntryBase,
-        broker: "sharekhan",
-        ...sharekhanResult,
-      });
+      if (sharekhanIsLimit && sharekhanPrice === "0") {
+        const failed = {
+          ...tradeEntryBase,
+          broker: "sharekhan",
+          ok: false,
+          dryRun: true,
+          error: "Sharekhan LIMIT order needs a resolved limit price",
+        };
+        trades.push(failed);
+        await insertMarketMayaTrade({
+          id: crypto.randomUUID(),
+          userId,
+          strategyId,
+          strategyName: strategy?.name || "",
+          receivedAt: receivedAt || now,
+          createdAt: now,
+          execute,
+          symbol: target.symbol || "",
+          symbolCode: target.symbolCode || "",
+          params: {
+            ...params,
+            broker: "sharekhan",
+            sharekhanOrderMode: "LIMIT",
+          },
+          response: failed,
+          ok: false,
+          error: failed.error,
+        });
+      } else {
+        const sharekhanResult = await placeSharekhanOrder({
+          apiKey: cfg.sharekhanApiKey,
+          accessToken: cfg.sharekhanAccessToken,
+          customerId: cfg.sharekhanCustomerId,
+          channelUser: cfg.sharekhanChannelUser || cfg.sharekhanCustomerId,
+          execute,
+          exchange: params.exchange,
+          segment: params.segment,
+          symbol: target.symbol || params.symbol,
+          symbolToken: target.symbolCode || params.symbol_code,
+          callType: params.call_type,
+          quantity: params.qty_value || "1",
+          productType: cfg.sharekhanProductType,
+          price: sharekhanPrice,
+          orderType: "NORMAL",
+        });
 
-      await insertMarketMayaTrade({
-        id: crypto.randomUUID(),
-        userId,
-        strategyId,
-        strategyName: strategy?.name || "",
-        receivedAt: receivedAt || now,
-        createdAt: now,
-        execute,
-        symbol: target.symbol || "",
-        symbolCode: target.symbolCode || "",
-        params: { ...params, broker: "sharekhan" },
-        response: sharekhanResult,
-        ok: Boolean(sharekhanResult.ok),
-        error: sharekhanResult.ok
-          ? null
-          : sharekhanResult.error || "Sharekhan request failed",
-      });
+        trades.push({
+          ...tradeEntryBase,
+          broker: "sharekhan",
+          ...sharekhanResult,
+        });
+
+        await insertMarketMayaTrade({
+          id: crypto.randomUUID(),
+          userId,
+          strategyId,
+          strategyName: strategy?.name || "",
+          receivedAt: receivedAt || now,
+          createdAt: now,
+          execute,
+          symbol: target.symbol || "",
+          symbolCode: target.symbolCode || "",
+          params: {
+            ...params,
+            broker: "sharekhan",
+            sharekhanPrice,
+            sharekhanOrderMode: sharekhanIsLimit ? "LIMIT" : "MARKET",
+          },
+          response: sharekhanResult,
+          ok: Boolean(sharekhanResult.ok),
+          error: sharekhanResult.ok
+            ? null
+            : sharekhanResult.error || "Sharekhan request failed",
+        });
+      }
     }
   }
 

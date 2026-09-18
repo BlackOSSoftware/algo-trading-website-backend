@@ -85,6 +85,23 @@ async function placeSharekhanTrade(req, res) {
     body.productType || body.producttype || body.sharekhanProductType || saved.productType || ""
   ).trim();
 
+  const appOrderType = String(body.orderType || body.order_type || "MARKET")
+    .trim()
+    .toUpperCase();
+  const requestedPrice = String(
+    body.price || body.limitPrice || body.limit_price || ""
+  ).trim();
+  const isLimitOrder = appOrderType === "LIMIT";
+  const sharekhanPrice = isLimitOrder
+    ? requestedPrice
+    : requestedPrice && requestedPrice !== "0"
+      ? requestedPrice
+      : "0";
+
+  if (isLimitOrder && (!sharekhanPrice || sharekhanPrice === "0")) {
+    throw createHttpError(400, "Limit price is required for Sharekhan LIMIT orders");
+  }
+
   const result = await placeSharekhanOrder({
     apiKey,
     accessToken,
@@ -98,8 +115,9 @@ async function placeSharekhanTrade(req, res) {
     callType: body.call_type || body.callType || body.transactionType,
     quantity: body.quantity || body.qty_value || body.qtyValue,
     productType,
-    price: body.price || "0",
+    price: sharekhanPrice,
     triggerPrice: body.triggerPrice || body.triggerprice || "0",
+    orderType: "NORMAL",
   });
 
   if (!result.ok && result.dryRun && result.error) {
