@@ -307,18 +307,19 @@ async function getSharekhanLivePrice({
   });
   const price = findLatestSharekhanPrice(response.payload);
   const ok = Boolean(response.ok && price);
+  const error = ok
+    ? null
+    : extractErrorMessage(response.payload, response.status) ||
+      (price ? "Sharekhan price lookup failed" : "Sharekhan live price is unavailable");
   return {
     ok,
     broker: "sharekhan",
     status: response.status,
+    expired: isSharekhanTokenExpiredError(response.status, error, response.payload),
     price,
     source: "sharekhanHistoricalLatest",
     result: sanitizeSharekhanPayload(response.payload),
-    error: ok
-      ? null
-      : price
-        ? extractErrorMessage(response.payload, response.status)
-        : "Sharekhan live price is unavailable",
+    error,
   };
 }
 
@@ -448,6 +449,22 @@ async function placeSharekhanOrder({
   const customerIdForApi = /^\d+$/.test(resolvedCustomerId)
     ? Number(resolvedCustomerId)
     : resolvedCustomerId;
+  const instrumentSummary = {
+    token: instrument.token,
+    symbol: instrument.symbol,
+    name: instrument.name,
+    exchange: instrument.exchange,
+    instrumentType: instrument.instrumentType,
+  };
+  const baseOrderDetails = {
+    customerId: customerIdForApi,
+    scripCode,
+    tradingSymbol: normalizeString(instrument.symbol || symbol).toUpperCase(),
+    exchange: sharekhanExchange,
+    transactionType,
+    quantity: Number(qty) || qty,
+    productType: resolveProductType({ segment, productType }),
+  };
   let resolvedLimitPrice = normalizePositivePrice(price);
   let priceLookup = null;
   if (!resolvedLimitPrice) {
@@ -468,24 +485,30 @@ async function placeSharekhanOrder({
       error:
         priceLookup?.error ||
         "Sharekhan LIMIT order needs a live price. Order was not sent because market orders are disabled.",
+      status: priceLookup?.status || null,
+      expired: Boolean(priceLookup?.expired),
       priceLookup,
-      instrument: {
-        token: instrument.token,
-        symbol: instrument.symbol,
-        name: instrument.name,
-        exchange: instrument.exchange,
-        instrumentType: instrument.instrumentType,
+      request: {
+        ...baseOrderDetails,
+        price: "",
+        triggerPrice: normalizeString(triggerPrice) || "0",
+        orderType: normalizeString(orderType).toUpperCase() || "NORMAL",
+        validity: normalizeString(validity).toUpperCase() || "GFD",
+        requestType: "NEW",
       },
+      instrument: instrumentSummary,
+      errorDetails: priceLookup
+        ? {
+            status: priceLookup.status,
+            message: priceLookup.error,
+            payload: priceLookup.result,
+          }
+        : null,
     };
   }
 
   const orderBody = {
-    customerId: customerIdForApi,
-    scripCode,
-    tradingSymbol: normalizeString(instrument.symbol || symbol).toUpperCase(),
-    exchange: sharekhanExchange,
-    transactionType,
-    quantity: Number(qty) || qty,
+    ...baseOrderDetails,
     disclosedQty: 0,
     price: resolvedLimitPrice,
     triggerPrice: normalizeString(triggerPrice) || "0",
@@ -495,7 +518,6 @@ async function placeSharekhanOrder({
     channelUser: resolvedChannelUser,
     validity: normalizeString(validity).toUpperCase() || "GFD",
     requestType: "NEW",
-    productType: resolveProductType({ segment, productType }),
   };
 
   if (instrumentType) {
@@ -519,13 +541,7 @@ async function placeSharekhanOrder({
       credentialsReady: Boolean(resolvedApiKey && resolvedAccessToken && resolvedCustomerId),
       preview: orderBody,
       priceLookup,
-      instrument: {
-        token: instrument.token,
-        symbol: instrument.symbol,
-        name: instrument.name,
-        exchange: instrument.exchange,
-        instrumentType: instrument.instrumentType,
-      },
+      instrument: instrumentSummary,
     };
   }
 
@@ -601,13 +617,7 @@ async function placeSharekhanOrder({
     status: response.status,
     orderId: orderId && orderId !== "0" ? orderId : "",
     request: requestBody,
-    instrument: {
-      token: instrument.token,
-      symbol: instrument.symbol,
-      name: instrument.name,
-      exchange: instrument.exchange,
-      instrumentType: instrument.instrumentType,
-    },
+    instrument: instrumentSummary,
     result: response,
     priceLookup,
     error: ok ? null : apiErrorMsg || extractErrorMessage(response.payload, response.status),
