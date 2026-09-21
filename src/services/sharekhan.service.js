@@ -229,6 +229,99 @@ function buildSharekhanHeaders({ apiKey, accessToken }) {
   };
 }
 
+function normalizePositivePrice(value) {
+  const raw = normalizeString(value).replace(/,/g, "");
+  if (!raw) return "";
+  const numeric = Number(raw);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  return String(Number(numeric.toFixed(2)));
+}
+
+function findLatestSharekhanPrice(value, visited = new Set()) {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "object") return "";
+  if (visited.has(value)) return "";
+  visited.add(value);
+
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const price = findLatestSharekhanPrice(value[index], visited);
+      if (price) return price;
+    }
+    return "";
+  }
+
+  const preferredKeys = [
+    "ltp",
+    "lastTradedPrice",
+    "last_traded_price",
+    "lastPrice",
+    "last_price",
+    "close",
+    "closePrice",
+    "close_price",
+    "price",
+  ];
+  for (const key of preferredKeys) {
+    const price = normalizePositivePrice(value[key]);
+    if (price) return price;
+  }
+
+  for (const nested of Object.values(value)) {
+    const price = findLatestSharekhanPrice(nested, visited);
+    if (price) return price;
+  }
+  return "";
+}
+
+async function getSharekhanLivePrice({
+  apiKey,
+  accessToken,
+  exchange,
+  scripCode,
+  interval = "1minute",
+}) {
+  const resolvedApiKey = normalizeString(apiKey);
+  const resolvedAccessToken = normalizeString(accessToken);
+  const resolvedExchange = normalizeString(exchange).toUpperCase();
+  const resolvedScripCode = normalizeString(scripCode);
+  if (!resolvedApiKey || !resolvedAccessToken || !resolvedExchange || !resolvedScripCode) {
+    return {
+      ok: false,
+      broker: "sharekhan",
+      error: "Sharekhan API Key, Access Token, exchange, and scripCode are required for live price",
+    };
+  }
+
+  const url = `${DEFAULT_BASE_URL}/skapi/services/historical/${encodeURIComponent(
+    resolvedExchange
+  )}/${encodeURIComponent(resolvedScripCode)}/${encodeURIComponent(
+    normalizeString(interval) || "1minute"
+  )}`;
+  const response = await fetchSharekhan(url, {
+    method: "GET",
+    headers: buildSharekhanHeaders({
+      apiKey: resolvedApiKey,
+      accessToken: resolvedAccessToken,
+    }),
+  });
+  const price = findLatestSharekhanPrice(response.payload);
+  const ok = Boolean(response.ok && price);
+  return {
+    ok,
+    broker: "sharekhan",
+    status: response.status,
+    price,
+    source: "sharekhanHistoricalLatest",
+    result: sanitizeSharekhanPayload(response.payload),
+    error: ok
+      ? null
+      : price
+        ? extractErrorMessage(response.payload, response.status)
+        : "Sharekhan live price is unavailable",
+  };
+}
+
 function fetchSharekhanNodeHttp(url, { method = "GET", headers = {}, body = null } = {}) {
   return new Promise((resolve) => {
     const parsed = new URL(url);
@@ -355,6 +448,36 @@ async function placeSharekhanOrder({
   const customerIdForApi = /^\d+$/.test(resolvedCustomerId)
     ? Number(resolvedCustomerId)
     : resolvedCustomerId;
+  let resolvedLimitPrice = normalizePositivePrice(price);
+  let priceLookup = null;
+  if (!resolvedLimitPrice) {
+    priceLookup = await getSharekhanLivePrice({
+      apiKey: resolvedApiKey,
+      accessToken: resolvedAccessToken,
+      exchange: sharekhanExchange,
+      scripCode,
+    });
+    resolvedLimitPrice = normalizePositivePrice(priceLookup.price);
+  }
+
+  if (!resolvedLimitPrice) {
+    return {
+      ok: false,
+      dryRun: !isTruthy(execute),
+      broker: "sharekhan",
+      error:
+        priceLookup?.error ||
+        "Sharekhan LIMIT order needs a live price. Order was not sent because market orders are disabled.",
+      priceLookup,
+      instrument: {
+        token: instrument.token,
+        symbol: instrument.symbol,
+        name: instrument.name,
+        exchange: instrument.exchange,
+        instrumentType: instrument.instrumentType,
+      },
+    };
+  }
 
   const orderBody = {
     customerId: customerIdForApi,
@@ -364,7 +487,7 @@ async function placeSharekhanOrder({
     transactionType,
     quantity: Number(qty) || qty,
     disclosedQty: 0,
-    price: normalizeString(price) || "0",
+    price: resolvedLimitPrice,
     triggerPrice: normalizeString(triggerPrice) || "0",
     rmsCode: "ANY",
     afterHour: normalizeString(afterHour).toUpperCase() || "N",
@@ -395,6 +518,7 @@ async function placeSharekhanOrder({
       broker: "sharekhan",
       credentialsReady: Boolean(resolvedApiKey && resolvedAccessToken && resolvedCustomerId),
       preview: orderBody,
+      priceLookup,
       instrument: {
         token: instrument.token,
         symbol: instrument.symbol,
@@ -485,6 +609,7 @@ async function placeSharekhanOrder({
       instrumentType: instrument.instrumentType,
     },
     result: response,
+    priceLookup,
     error: ok ? null : apiErrorMsg || extractErrorMessage(response.payload, response.status),
     errorDetails: ok
       ? null
@@ -894,6 +1019,7 @@ async function getSharekhanPositions({ apiKey, accessToken, customerId }) {
 
 module.exports = {
   placeSharekhanOrder,
+  getSharekhanLivePrice,
   mapCallTypeToTransaction,
   mapExchangeCode,
   buildSharekhanLoginUrl,

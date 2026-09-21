@@ -1736,88 +1736,60 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
     }
 
     if (sendSharekhan) {
-      const sharekhanIsLimit = String(params.order_type || "").toUpperCase() === "LIMIT";
-      const sharekhanLimitPrice = String(params.price || "").trim();
-      const sharekhanPrice =
-        sharekhanIsLimit && sharekhanLimitPrice && sharekhanLimitPrice !== "0"
-          ? sharekhanLimitPrice
-          : "0";
+      const sharekhanPrice = String(params.price || "").trim();
+      const sharekhanResult = await placeSharekhanOrder({
+        apiKey: cfg.sharekhanApiKey,
+        accessToken: cfg.sharekhanAccessToken,
+        customerId: cfg.sharekhanCustomerId,
+        channelUser: cfg.sharekhanChannelUser || cfg.sharekhanCustomerId,
+        execute,
+        exchange: params.exchange,
+        segment: params.segment,
+        symbol: target.symbol || params.symbol,
+        symbolToken: target.symbolCode || params.symbol_code,
+        callType: params.call_type,
+        quantity: params.qty_value || "1",
+        productType: cfg.sharekhanProductType,
+        price: sharekhanPrice,
+        orderType: "NORMAL",
+      });
+      const resolvedSharekhanPrice =
+        sharekhanResult.request?.price ||
+        sharekhanResult.preview?.price ||
+        sharekhanResult.priceLookup?.price ||
+        sharekhanPrice ||
+        "";
 
-      if (sharekhanIsLimit && sharekhanPrice === "0") {
-        const failed = {
-          ...tradeEntryBase,
+      trades.push({
+        ...tradeEntryBase,
+        broker: "sharekhan",
+        orderType: "LIMIT",
+        price: resolvedSharekhanPrice || tradeEntryBase.price,
+        ...sharekhanResult,
+      });
+
+      await insertMarketMayaTrade({
+        id: crypto.randomUUID(),
+        userId,
+        strategyId,
+        strategyName: strategy?.name || "",
+        receivedAt: receivedAt || now,
+        createdAt: now,
+        execute,
+        symbol: target.symbol || "",
+        symbolCode: target.symbolCode || "",
+        params: {
+          ...params,
           broker: "sharekhan",
-          ok: false,
-          dryRun: true,
-          error: "Sharekhan LIMIT order needs a resolved limit price",
-        };
-        trades.push(failed);
-        await insertMarketMayaTrade({
-          id: crypto.randomUUID(),
-          userId,
-          strategyId,
-          strategyName: strategy?.name || "",
-          receivedAt: receivedAt || now,
-          createdAt: now,
-          execute,
-          symbol: target.symbol || "",
-          symbolCode: target.symbolCode || "",
-          params: {
-            ...params,
-            broker: "sharekhan",
-            sharekhanOrderMode: "LIMIT",
-          },
-          response: failed,
-          ok: false,
-          error: failed.error,
-        });
-      } else {
-        const sharekhanResult = await placeSharekhanOrder({
-          apiKey: cfg.sharekhanApiKey,
-          accessToken: cfg.sharekhanAccessToken,
-          customerId: cfg.sharekhanCustomerId,
-          channelUser: cfg.sharekhanChannelUser || cfg.sharekhanCustomerId,
-          execute,
-          exchange: params.exchange,
-          segment: params.segment,
-          symbol: target.symbol || params.symbol,
-          symbolToken: target.symbolCode || params.symbol_code,
-          callType: params.call_type,
-          quantity: params.qty_value || "1",
-          productType: cfg.sharekhanProductType,
-          price: sharekhanPrice,
-          orderType: "NORMAL",
-        });
-
-        trades.push({
-          ...tradeEntryBase,
-          broker: "sharekhan",
-          ...sharekhanResult,
-        });
-
-        await insertMarketMayaTrade({
-          id: crypto.randomUUID(),
-          userId,
-          strategyId,
-          strategyName: strategy?.name || "",
-          receivedAt: receivedAt || now,
-          createdAt: now,
-          execute,
-          symbol: target.symbol || "",
-          symbolCode: target.symbolCode || "",
-          params: {
-            ...params,
-            broker: "sharekhan",
-            sharekhanPrice,
-            sharekhanOrderMode: sharekhanIsLimit ? "LIMIT" : "MARKET",
-          },
-          response: sharekhanResult,
-          ok: Boolean(sharekhanResult.ok),
-          error: sharekhanResult.ok
-            ? null
-            : sharekhanResult.error || "Sharekhan request failed",
-        });
-      }
+          sharekhanPrice: resolvedSharekhanPrice,
+          sharekhanOrderMode: "LIMIT",
+        },
+        response: sharekhanResult,
+        ok: Boolean(sharekhanResult.ok),
+        error: sharekhanResult.ok
+          ? null
+          : sharekhanResult.error || "Sharekhan request failed",
+      });
     }
   }
 
