@@ -49,6 +49,7 @@ async function connectMongo() {
   await db.collection("mstock_instruments").createIndex({ instrumentType: 1 });
   await db.collection("mstock_instruments").createIndex({ searchText: 1 });
   await db.collection("mstock_instruments").createIndex({ syncedAt: -1 });
+  await db.collection("sharekhan_links").createIndex({ code: 1 }, { unique: true });
 
   return db;
 }

@@ -96,8 +96,13 @@ const {
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 const adminSharekhanFeed = require("../../controllers/sharekhanMarketData.controller");
+const sharekhanLinks = require("../../controllers/sharekhanLink.controller");
 
 function registerV1Routes(router) {
+  router.get("/l/:code", sharekhanLinks.redirect);
+  router.get("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.list));
+  router.post("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.create));
+  router.post("/api/v1/admin/sharekhan-links/:code/deactivate", requireAdmin(sharekhanLinks.deactivate));
   router.get("/api/v1/admin/sharekhan-feed/status", requireAdmin(adminSharekhanFeed.status));
   router.post("/api/v1/admin/sharekhan-feed/login", requireAdmin(adminSharekhanFeed.login));
   router.post("/api/v1/admin/sharekhan-feed/complete", requireAdmin(adminSharekhanFeed.complete));
