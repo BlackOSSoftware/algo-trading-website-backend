@@ -100,6 +100,8 @@ const sharekhanLinks = require("../../controllers/sharekhanLink.controller");
 
 function registerV1Routes(router) {
   router.get("/l/:code", sharekhanLinks.redirect);
+  router.get("/api/v1/order-intents/:code", sharekhanLinks.getIntent);
+  router.post("/api/v1/admin/order-intents", requireAdmin(sharekhanLinks.createIntent));
   router.get("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.list));
   router.post("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.create));
   router.post("/api/v1/admin/sharekhan-links/:code/deactivate", requireAdmin(sharekhanLinks.deactivate));
