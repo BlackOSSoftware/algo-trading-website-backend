@@ -8,6 +8,7 @@ const {
   getSymbolPosition,
   summarizeTradeResultForTelegram,
 } = require("../services/marketMaya.service");
+const { holdCharge, releaseHold } = require("../services/wallet.service");
 
 function normalizeString(value) {
   const trimmed = String(value || "").trim();
@@ -385,7 +386,29 @@ async function trade(req, res) {
 
   validateTradeParams(params);
 
-  const result = await customTrade({ token, params, execute });
+  let creditHold = null;
+  if (isTruthy(execute)) {
+    creditHold = await holdCharge(userId, "marketMaya", {
+      title: "Market Maya trade",
+      note: "Manual trade",
+    });
+    if (!creditHold.ok) {
+      throw createHttpError(400, creditHold.reason || "Not enough credits");
+    }
+  }
+
+  let result;
+  try {
+    result = await customTrade({ token, params, execute });
+  } catch (err) {
+    if (creditHold?.held) {
+      await releaseHold(userId, creditHold, "Market Maya order was not placed");
+    }
+    throw err;
+  }
+  if (creditHold?.held && (!result.ok || result.dryRun)) {
+    await releaseHold(userId, creditHold, "Market Maya order was not placed");
+  }
   if (!result.ok && result.dryRun && result.error) {
     throw createHttpError(400, result.error);
   }

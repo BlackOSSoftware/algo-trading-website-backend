@@ -84,6 +84,15 @@ const {
   getSharekhanTradePositions,
   getSharekhanSessionStatus,
 } = require("../../controllers/sharekhan.controller");
+const {
+  getWallet,
+  recharge,
+  paid,
+  adminGet,
+  adminSaveSettings,
+  adminSetCharges,
+  adminReview,
+} = require("../../controllers/wallet.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
 const adminSharekhanFeed = require("../../controllers/sharekhanMarketData.controller");
@@ -126,6 +135,14 @@ function registerV1Routes(router) {
   router.post("/api/v1/plans/create-order", requireAuth(createPlanOrder));
   router.post("/api/v1/plans/verify-payment", requireAuth(verifyPlanPayment));
   router.get("/api/v1/plans/requests", requireAuth(listUserRequests));
+
+  router.get("/api/v1/wallet", requireAuth(getWallet));
+  router.post("/api/v1/wallet/recharge", requireAuth(recharge));
+  router.post("/api/v1/wallet/recharge/paid", requireAuth(paid));
+  router.get("/api/v1/admin/wallet", requireAdmin(adminGet));
+  router.post("/api/v1/admin/wallet/settings", requireAdmin(adminSaveSettings));
+  router.post("/api/v1/admin/wallet/charges", requireAdmin(adminSetCharges));
+  router.post("/api/v1/admin/wallet/review", requireAdmin(adminReview));
 
   router.get("/api/v1/admin/users", requireAdmin(listUsers));
   router.post("/api/v1/admin/users/plan", requireAdmin(updatePlan));

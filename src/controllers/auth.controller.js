@@ -25,7 +25,10 @@ function getJwtSecret() {
 function sanitizeUser(user) {
   if (!user) return null;
   const { passwordHash, otpHash, otpExpiresAt, otpAttempts, ...safeUser } = user;
-  return safeUser;
+  return {
+    ...safeUser,
+    walletBalance: Math.max(0, Math.round(Number(user.walletBalance || 0))),
+  };
 }
 
 function signToken(user) {

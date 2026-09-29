@@ -16,6 +16,7 @@ const {
   takeSharekhanLoginResult,
 } = require("../services/sharekhanLoginSession.store");
 const { findUserById, updateUserById } = require("../models/user.model");
+const { holdCharge, releaseHold } = require("../services/wallet.service");
 const { updateStrategyByIdForUser } = require("../models/strategy.model");
 
 function normalizeSecureKey(value) {
@@ -98,7 +99,20 @@ async function placeSharekhanTrade(req, res) {
       ? requestedPrice
       : "";
 
-  const result = await placeSharekhanOrder({
+  let creditHold = null;
+  if (execute) {
+    creditHold = await holdCharge(userId, "sharekhan", {
+      title: "Sharekhan trade",
+      note: "Manual trade",
+    });
+    if (!creditHold.ok) {
+      throw createHttpError(400, creditHold.reason || "Not enough credits");
+    }
+  }
+
+  let result;
+  try {
+    result = await placeSharekhanOrder({
     apiKey,
     accessToken,
     customerId,
@@ -115,7 +129,16 @@ async function placeSharekhanTrade(req, res) {
     triggerPrice: body.triggerPrice || body.triggerprice || "0",
     orderType: "NORMAL",
   });
+  } catch (err) {
+    if (creditHold?.held) {
+      await releaseHold(userId, creditHold, "Sharekhan order was not placed");
+    }
+    throw err;
+  }
 
+  if (creditHold?.held && (!result.ok || result.dryRun)) {
+    await releaseHold(userId, creditHold, "Sharekhan order was not placed");
+  }
   if (!result.ok && result.dryRun && result.error) {
     throw createHttpError(400, result.error);
   }

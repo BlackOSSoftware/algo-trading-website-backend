@@ -27,6 +27,7 @@ const { findUserById, isPlanActive } = require("../services/user.service");
 const { executeStrategyAutoTrades } = require("../services/strategyAutoTrade.service");
 const { summarizeTradeResultForTelegram } = require("../services/marketMaya.service");
 const { sendSignalEmail } = require("../services/email.service");
+const { holdCharge, releaseHold } = require("../services/wallet.service");
 
 function sanitizeHeaders(headers) {
   const blocked = new Set(["authorization", "cookie"]);
@@ -484,7 +485,20 @@ async function signalWebhook(provider, req, res) {
           },
         };
 
-        if (ownerEmail && ownerPlanActive && isEmailAlertEnabled(strategy)) {
+        debug.wallet = {};
+        const wantsEmail = Boolean(ownerEmail && ownerPlanActive && isEmailAlertEnabled(strategy));
+        const wantsTelegram = recipients.size > 0;
+        let alertHold = null;
+        if (owner && (wantsEmail || wantsTelegram)) {
+          alertHold = await holdCharge(owner._id, "alert", {
+            title: "Alert",
+            note: strategy.name || "Webhook alert",
+          });
+          if (!alertHold.ok) debug.wallet.alert = alertHold.reason;
+        }
+        const canSendAlert = !(wantsEmail || wantsTelegram) || Boolean(alertHold?.ok);
+
+        if (canSendAlert && wantsEmail) {
           const alertName =
             payload?.alert_name || payload?.alertName || payload?.scan_name || "Signal";
           const scanName = payload?.scan_name || payload?.scanName || getProviderLabel(provider);
@@ -505,10 +519,15 @@ async function signalWebhook(provider, req, res) {
             debug.email.error = err instanceof Error ? err.message : "Email failed";
           }
         } else {
-          debug.email.alert = { successCount: 0, failureCount: 0, skipped: true };
+          debug.email.alert = {
+            successCount: 0,
+            failureCount: 0,
+            skipped: true,
+            reason: alertHold && !alertHold.ok ? alertHold.reason : undefined,
+          };
         }
 
-        if (recipients.size > 0) {
+        if (canSendAlert && recipients.size > 0) {
           const tasks = Array.from(recipients).map((chatId) =>
             sendTelegramMessage(chatId, {
               strategyName: strategy.name,
@@ -519,7 +538,20 @@ async function signalWebhook(provider, req, res) {
           const results = await Promise.allSettled(tasks);
           debug.telegram.alert = summarizeSettled(results);
         } else {
-          debug.telegram.alert = { successCount: 0, failureCount: 0, skipped: true };
+          debug.telegram.alert = {
+            successCount: 0,
+            failureCount: 0,
+            skipped: true,
+            reason: alertHold && !alertHold.ok ? alertHold.reason : undefined,
+          };
+        }
+
+        const alertSent =
+          Number(debug.email?.alert?.successCount || 0) > 0 ||
+          Number(debug.telegram?.alert?.successCount || 0) > 0;
+        if (owner && alertHold?.held && !alertSent) {
+          await releaseHold(owner._id, alertHold, "Alert was not delivered");
+          debug.wallet.alertRefunded = true;
         }
 
         let tradeResult = null;
@@ -536,13 +568,78 @@ async function signalWebhook(provider, req, res) {
             trades: [],
           };
         } else {
+          const holds = { maya: null, sharekhan: null };
           try {
+            const cfg = strategy.marketMaya || {};
+            const mayaToken = String(cfg.token || process.env.MARKETMAYA_TOKEN || "").trim();
+            const mayaOn =
+              (cfg.marketMayaEnabled == null ? Boolean(mayaToken) : Boolean(cfg.marketMayaEnabled)) &&
+              Boolean(mayaToken);
+            const sharekhanOn = Boolean(cfg.sharekhanDirect);
+            const runStrategy = {
+              ...strategy,
+              marketMaya: { ...cfg },
+            };
+            if (owner && mayaOn) {
+              holds.maya = await holdCharge(owner._id, "marketMaya", {
+                title: "Market Maya trade",
+                note: strategy.name || "Webhook trade",
+              });
+              if (!holds.maya.ok) {
+                runStrategy.marketMaya.marketMayaEnabled = false;
+                runStrategy.marketMaya.token = "";
+                debug.marketMaya.skipped = true;
+                debug.marketMaya.enabled = true;
+                debug.marketMaya.reason = holds.maya.reason;
+                debug.wallet.marketMaya = holds.maya.reason;
+              }
+            }
+            if (owner && sharekhanOn) {
+              holds.sharekhan = await holdCharge(owner._id, "sharekhan", {
+                title: "Sharekhan trade",
+                note: strategy.name || "Webhook trade",
+              });
+              if (!holds.sharekhan.ok) {
+                runStrategy.marketMaya.sharekhanDirect = false;
+                debug.sharekhan = {
+                  enabled: true,
+                  skipped: true,
+                  reason: holds.sharekhan.reason,
+                  total: 0,
+                  successCount: 0,
+                  failureCount: 0,
+                  trades: [],
+                };
+                debug.wallet.sharekhan = holds.sharekhan.reason;
+              }
+            }
+
             tradeResult = await executeStrategyAutoTrades({
-              strategy,
+              strategy: runStrategy,
               payload,
               receivedAt,
               sharekhanConfig: owner?.sharekhan || null,
             });
+
+            const placed = (broker) =>
+              Boolean(tradeResult?.execute) &&
+              Array.isArray(tradeResult?.trades) &&
+              tradeResult.trades.some(
+                (trade) =>
+                  (broker === "marketMaya"
+                    ? !trade.broker || trade.broker === "marketMaya"
+                    : trade.broker === "sharekhan") &&
+                  trade.ok &&
+                  !trade.dryRun
+              );
+            if (owner && holds.maya?.held && !placed("marketMaya")) {
+              await releaseHold(owner._id, holds.maya, "Market Maya order was not placed");
+              debug.wallet.marketMayaRefunded = true;
+            }
+            if (owner && holds.sharekhan?.held && !placed("sharekhan")) {
+              await releaseHold(owner._id, holds.sharekhan, "Sharekhan order was not placed");
+              debug.wallet.sharekhanRefunded = true;
+            }
 
             debug.marketMaya.execute = Boolean(tradeResult.execute);
             debug.marketMaya.ok = Boolean(tradeResult.ok);
@@ -600,6 +697,12 @@ async function signalWebhook(provider, req, res) {
           } catch (err) {
             debug.marketMaya.skipped = true;
             debug.marketMaya.error = err instanceof Error ? err.message : "Market Maya trade failed";
+            if (owner && holds?.maya?.held) {
+              await releaseHold(owner._id, holds.maya, "Market Maya trade failed");
+            }
+            if (owner && holds?.sharekhan?.held) {
+              await releaseHold(owner._id, holds.sharekhan, "Sharekhan trade failed");
+            }
           }
         }
 
