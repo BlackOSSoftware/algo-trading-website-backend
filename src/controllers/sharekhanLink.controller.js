@@ -26,7 +26,7 @@ function parsePayload(input) {
 
 function publicRecord(record, req) {
   const base = (process.env.PUBLIC_API_URL || "https://api.emotionlesstraders.com").replace(/\/$/, "");
-  return { code: record.code, shortUrl: `${base}/l/${record.code}`, destination: `${BASE}?deepLinking=${encodeURIComponent(record.payload)}`,
+  return { code: record.code, shortUrl: `${base}/l/${record.code}`, destination: `${BASE}?deepLinking=${record.payload}`,
     details: record.details, active: record.active, createdAt: record.createdAt, clicks: record.clicks || 0 };
 }
 
@@ -57,7 +57,7 @@ async function redirect(req, res) {
   const record = await collection().findOne({ code: req.params.code, active: true });
   if (!record) throw createHttpError(404, "Link not found or inactive");
   await collection().updateOne({ _id: record._id }, { $inc: { clicks: 1 } });
-  res.writeHead(302, { Location: `${BASE}?deepLinking=${encodeURIComponent(record.payload)}`,
+  res.writeHead(302, { Location: `${BASE}?deepLinking=${record.payload}`,
     "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
   res.end();
 }
