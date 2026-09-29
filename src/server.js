@@ -15,6 +15,8 @@ const {
   stopTelegramPolling,
 } = require("./services/telegramPolling.service");
 
+const { startSharekhanMarketData, closeSharekhanStreams } = require("./services/sharekhanMarketData.service");
+
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 const CORS_ALLOW_CREDENTIALS = process.env.CORS_ALLOW_CREDENTIALS === "true";
@@ -64,6 +66,7 @@ function setCorsHeaders(req, res) {
 async function startServer() {
   await connectMongo();
   await ensureAdminSeed();
+  await startSharekhanMarketData();
   await syncTelegramWebhook();
   startTelegramPolling();
 
@@ -95,6 +98,7 @@ async function startServer() {
 
   const shutdown = async () => {
     stopTelegramPolling();
+    closeSharekhanStreams();
     await closeMongo();
     server.close(() => process.exit(0));
   };

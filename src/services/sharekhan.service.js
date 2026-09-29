@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { resolveInstrumentForOrder } = require("../models/mstockInstrument.model");
 const https = require("https");
+const { getSharekhanStreamPrice } = require("./sharekhanMarketData.service");
 
 const DEFAULT_BASE_URL = "https://api.sharekhan.com";
 const PLACE_ORDER_PATH = "/skapi/services/orders";
@@ -237,90 +238,13 @@ function normalizePositivePrice(value) {
   return String(Number(numeric.toFixed(2)));
 }
 
-function findLatestSharekhanPrice(value, visited = new Set()) {
-  if (value === null || value === undefined) return "";
-  if (typeof value !== "object") return "";
-  if (visited.has(value)) return "";
-  visited.add(value);
-
-  if (Array.isArray(value)) {
-    for (let index = value.length - 1; index >= 0; index -= 1) {
-      const price = findLatestSharekhanPrice(value[index], visited);
-      if (price) return price;
-    }
-    return "";
-  }
-
-  const preferredKeys = [
-    "ltp",
-    "lastTradedPrice",
-    "last_traded_price",
-    "lastPrice",
-    "last_price",
-    "close",
-    "closePrice",
-    "close_price",
-    "price",
-  ];
-  for (const key of preferredKeys) {
-    const price = normalizePositivePrice(value[key]);
-    if (price) return price;
-  }
-
-  for (const nested of Object.values(value)) {
-    const price = findLatestSharekhanPrice(nested, visited);
-    if (price) return price;
-  }
-  return "";
-}
-
-async function getSharekhanLivePrice({
-  apiKey,
-  accessToken,
-  exchange,
-  scripCode,
-  interval = "1minute",
-}) {
-  const resolvedApiKey = normalizeString(apiKey);
-  const resolvedAccessToken = normalizeString(accessToken);
-  const resolvedExchange = normalizeString(exchange).toUpperCase();
+async function getSharekhanLivePrice({ exchange, scripCode }) {
+  const resolvedExchange = mapExchangeCode(exchange);
   const resolvedScripCode = normalizeString(scripCode);
-  if (!resolvedApiKey || !resolvedAccessToken || !resolvedExchange || !resolvedScripCode) {
-    return {
-      ok: false,
-      broker: "sharekhan",
-      error: "Sharekhan API Key, Access Token, exchange, and scripCode are required for live price",
-    };
+  if (!/^(NC|BC|NF|BF|CD|MX)$/.test(resolvedExchange) || !/^[1-9]\d*$/.test(resolvedScripCode)) {
+    return { ok: false, broker: "sharekhan", error: "Valid exchange and scripCode required for live price" };
   }
-
-  const url = `${DEFAULT_BASE_URL}/skapi/services/historical/${encodeURIComponent(
-    resolvedExchange
-  )}/${encodeURIComponent(resolvedScripCode)}/${encodeURIComponent(
-    normalizeString(interval) || "1minute"
-  )}`;
-  const response = await fetchSharekhan(url, {
-    method: "GET",
-    headers: buildSharekhanHeaders({
-      apiKey: resolvedApiKey,
-      accessToken: resolvedAccessToken,
-    }),
-  });
-  const price = findLatestSharekhanPrice(response.payload);
-  const ok = Boolean(response.ok && price);
-  const error = ok
-    ? null
-    : extractErrorMessage(response.payload, response.status) ||
-      (price ? "Sharekhan price lookup failed" : "Sharekhan live price is unavailable");
-  return {
-    ok,
-    broker: "sharekhan",
-    status: response.status,
-    expired: isSharekhanTokenExpiredError(response.status, error, response.payload),
-    price,
-    source: "sharekhanHistoricalLatest",
-    result: sanitizeSharekhanPayload(response.payload),
-    error,
-  };
+  return getSharekhanStreamPrice({ exchange: resolvedExchange, scripCode: resolvedScripCode });
 }
 
 function fetchSharekhanNodeHttp(url, { method = "GET", headers = {}, body = null } = {}) {
@@ -467,14 +391,12 @@ async function placeSharekhanOrder({
   };
   let resolvedLimitPrice = normalizePositivePrice(price);
   let priceLookup = null;
-  if (!resolvedLimitPrice) {
+  if (isTruthy(execute) || !resolvedLimitPrice) {
     priceLookup = await getSharekhanLivePrice({
-      apiKey: resolvedApiKey,
-      accessToken: resolvedAccessToken,
       exchange: sharekhanExchange,
       scripCode,
     });
-    resolvedLimitPrice = normalizePositivePrice(priceLookup.price);
+    resolvedLimitPrice = priceLookup.ok ? normalizePositivePrice(priceLookup.price) : "";
   }
 
   if (!resolvedLimitPrice) {

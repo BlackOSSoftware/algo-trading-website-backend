@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { customTrade, getSymbolPosition, resolveToken } = require("./marketMaya.service");
-const { placeSharekhanOrder } = require("./sharekhan.service");
+const { placeSharekhanOrder, getSharekhanLivePrice } = require("./sharekhan.service");
+const { resolveInstrumentForOrder } = require("../models/mstockInstrument.model");
 const { resolveMStockCandlePrice } = require("./mstock.service");
 const {
   parseClockTime,
@@ -997,7 +998,7 @@ function getStrategyIds(strategy) {
   return { userId, strategyId };
 }
 
-async function buildBaseParams({ strategy, payload, symbol, symbolCode, receivedAt }) {
+async function buildBaseParams({ strategy, payload, symbol, symbolCode, receivedAt, sharekhanPrices = false }) {
   const cfg = strategy?.marketMaya && typeof strategy.marketMaya === "object" ? strategy.marketMaya : {};
   const extraParams =
     cfg.extraParams && typeof cfg.extraParams === "object" && !Array.isArray(cfg.extraParams)
@@ -1047,7 +1048,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
     : normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
       normalizeString(cfg.limitPrice);
   const limitPriceSource =
-    limitPriceSourceConfigured || (limitPriceRawCandidate ? "fixed" : "trigger");
+    sharekhanPrices ? "sharekhanLive" : limitPriceSourceConfigured || (limitPriceRawCandidate ? "fixed" : "trigger");
   const limitPriceRaw = limitPriceSource === "fixed" ? limitPriceRawCandidate : "";
   const hasLimitPrice = Boolean(limitPriceRaw);
   const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
@@ -1065,7 +1066,15 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   const mStockCandleInterval = normalizeString(cfg.mStockInterval) || "";
   const mStockCandleOffset = normalizePositiveInt(cfg.mStockCandleOffset) || 1;
 
-  if (isMStockCandlePriceSource) {
+  if (sharekhanPrices && !exitTrade) {
+    const resolved = await resolveInstrumentForOrder({ symbol, symbolToken: symbolCode, exchange, segment });
+    const quote = resolved?.token
+      ? await getSharekhanLivePrice({ exchange: resolved.exchange || exchange, scripCode: resolved.token })
+      : { ok: false, error: "Sharekhan instrument not found for live price" };
+    dynamicSourcePrice = quote.ok ? Number(quote.price) : null;
+    dynamicSourceLabel = "Sharekhan live price";
+    dynamicSourceError = quote.ok ? "" : quote.error;
+  } else if (isMStockCandlePriceSource) {
     const mStockResult = await resolveMStockCandlePrice({
       config: cfg,
       source: limitPriceSource,
@@ -1117,7 +1126,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
   const bufferActive =
-    orderType === "LIMIT" && limitPriceSource !== "fixed" && Boolean(bufferBy);
+    !sharekhanPrices && orderType === "LIMIT" && limitPriceSource !== "fixed" && Boolean(bufferBy);
   const bufferedPrice = bufferActive
     ? applyBufferToPrice(dynamicSourcePrice, bufferValue, callType, bufferBy)
     : null;
@@ -1127,7 +1136,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       ? limitPriceSource === "fixed"
         ? limitPriceNumeric
         : triggerBasedPrice ?? limitPriceNumeric
-      : payloadTriggerPrice ?? limitPriceNumeric;
+      : sharekhanPrices ? dynamicSourcePrice : payloadTriggerPrice ?? limitPriceNumeric;
   const limitPriceResolved =
     orderType === "LIMIT"
       ? limitPriceSource === "fixed"
@@ -1381,13 +1390,14 @@ function extractSymbolsFromPayload(payload, cfg) {
   return { symbolCode: "", symbols: symbols.length > 0 ? [symbols[0]] : [] };
 }
 
-async function buildTradeParams({ strategy, payload, symbol, symbolCode, receivedAt }) {
+async function buildTradeParams({ strategy, payload, symbol, symbolCode, receivedAt, sharekhanPrices = false }) {
   const { cfg, base, buildError, priceDetails } = await buildBaseParams({
     strategy,
     payload,
     symbol,
     symbolCode,
     receivedAt,
+    sharekhanPrices,
   });
 
   let params = { ...base };
@@ -1657,6 +1667,7 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
       symbol: target.symbol,
       symbolCode: target.symbolCode,
       receivedAt,
+      sharekhanPrices: sendSharekhan && !sendMarketMaya,
     });
     const params = built.params;
 

@@ -86,7 +86,14 @@ const {
 } = require("../../controllers/sharekhan.controller");
 const { requireAuth, requireAdmin } = require("../../middlewares/auth");
 
+const adminSharekhanFeed = require("../../controllers/sharekhanMarketData.controller");
+
 function registerV1Routes(router) {
+  router.get("/api/v1/admin/sharekhan-feed/status", requireAdmin(adminSharekhanFeed.status));
+  router.post("/api/v1/admin/sharekhan-feed/login", requireAdmin(adminSharekhanFeed.login));
+  router.post("/api/v1/admin/sharekhan-feed/complete", requireAdmin(adminSharekhanFeed.complete));
+  router.post("/api/v1/admin/sharekhan-feed/reconnect", requireAdmin(adminSharekhanFeed.reconnect));
+  router.post("/api/v1/admin/sharekhan-feed/disconnect", requireAdmin(adminSharekhanFeed.disconnect));
   router.post("/api/v1/webhooks/chartink", chartinkWebhook);
   router.post("/api/v1/webhooks/tradingview", tradingViewWebhook);
   router.post("/api/v1/webhook/razorpay", razorpayWebhook);
