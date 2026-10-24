@@ -6,7 +6,7 @@ const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
 
 const collection = () => getDb().collection("sharekhan_links");
-const BASE = "https://downloads.sharekhan.com/download/sharemobile/onetap.html";
+const SHAREKHAN_TRADING_HOME = "https://newtrade.sharekhan.com/";
 
 function parsePayload(input) {
   const value = String(input || "").trim();
@@ -27,18 +27,16 @@ function parsePayload(input) {
 }
 
 function webTradeUrl(details) {
-  const exchange = details?.exchange === "BSE" ? "BSE" : "NSE";
+  const exchange = String(details?.exchange || "").trim().toUpperCase();
   const symbol = encodeURIComponent(String(details?.tradingSymbol || "").trim().toUpperCase());
   const scripCode = String(details?.scripCode || "").trim();
-  if (!symbol) return "";
+  if (!symbol || !scripCode || !["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) return SHAREKHAN_TRADING_HOME;
   return `https://newtrade.sharekhan.com/skweb/trading/tradenow/normal/${exchange}/${symbol}/${scripCode}`;
 }
 
-// Sharekhan's onetap.js reads deepLinking as the raw text before "&redirect_windows", so it must stay first.
-function onetapUrl(payload, details) {
-  const deepLinking = String(payload).replace(/\$/g, "%24");
-  const web = webTradeUrl(details);
-  return `${BASE}?deepLinking=${deepLinking}${web ? `&redirect_windows=${encodeURIComponent(web)}` : ""}`;
+// The old Sharekhan one-tap host has an expired TLS certificate. Keep every app-generated destination on its valid trading host.
+function onetapUrl(_payload, details) {
+  return webTradeUrl(details);
 }
 
 // Matches Sharekhan's own link format: 131$<exchange>$<scrip>$<side>$<price>$<qty>, NSE = 11, empty price = market.
@@ -141,7 +139,7 @@ async function getIntent(req, res) {
   await collection().updateOne({ _id: record._id }, { $inc: { clicks: 1 } });
   res.setHeader("Cache-Control", "no-store");
   const payload = intentPayload(record);
-  sendJson(res, 200, { ok: true, details: record.details, appUrl: payload ? onetapUrl(payload, record.details) : "" });
+  sendJson(res, 200, { ok: true, details: record.details, appUrl: webTradeUrl(record.details) });
 }
 
 async function create(req, res) {
@@ -176,4 +174,4 @@ async function redirect(req, res) {
   res.end();
 }
 
-module.exports = { create, createIntent, getIntent, list, deactivate, redirect, parsePayload, buildOrderDeepLink };
+module.exports = { create, createIntent, getIntent, list, deactivate, redirect, parsePayload, buildOrderDeepLink, webTradeUrl };
