@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const QRCode = require("qrcode");
 const { getDb } = require("../config/db");
 const { resolveInstrumentForOrder } = require("../models/mstockInstrument.model");
 const { parseBody } = require("../utils/body");
@@ -34,9 +35,58 @@ function webTradeUrl(details) {
   return `https://newtrade.sharekhan.com/skweb/trading/tradenow/normal/${exchange}/${symbol}/${scripCode}`;
 }
 
-// The old Sharekhan one-tap host has an expired TLS certificate. Keep every app-generated destination on its valid trading host.
-function onetapUrl(_payload, details) {
-  return webTradeUrl(details);
+// Pehle downloads.sharekhan.com/onetap.html app kholta tha; us host ka SSL ab expire hai.
+// Wahi onetap.js Android/iOS pe Adjust + splashscheme:// se app kholta hai — hum seedha wahi URL use karte hain (webpage nahi).
+function mobileAppUrls(payload) {
+  const deep = String(payload || "").trim();
+  if (!deep) return { android: "", ios: "", scheme: "" };
+  // Exact Sharekhan onetap.js format: prefix encoded, payload appended raw (with $).
+  return {
+    android: `https://app.adjust.net.in/tp42jlw?label=ADJUST_DEEP_LINK&deeplink=splashscheme%3A%2F%2FDEEPLINK%3D${deep}`,
+    ios: `https://v6yk.adj.st/102%2411%2422?adj_t=1t1b59tm&adj_deep_link=splashscheme%3A%2F%2F${deep}`,
+    scheme: `splashscheme://DEEPLINK=${deep}`,
+  };
+}
+
+function pickMobileAppUrl(payload, userAgent) {
+  const urls = mobileAppUrls(payload);
+  if (!urls.android && !urls.ios) return "";
+  const ua = String(userAgent || "").toLowerCase();
+  if (/iphone|ipad|ipod/.test(ua)) return urls.ios || urls.android;
+  return urls.android || urls.ios;
+}
+
+function publicApiBase() {
+  return (process.env.PUBLIC_API_URL || "https://api.emotionlesstraders.com").replace(/\/$/, "");
+}
+
+// Same shape as pehle (…?deepLinking=131$…) so the order page auto-opens on phone,
+// but hosted on our API (valid SSL) and redirected to Sharekhan's Adjust app link — never the website.
+function ourOnetapUrl(payload) {
+  const deep = String(payload || "").trim();
+  if (!deep) return "";
+  return `${publicApiBase()}/sk-onetap?deepLinking=${deep}`;
+}
+
+function onetapUrl(payload, _details, userAgent) {
+  // Prefer our deepLinking URL (works with old frontend auto-open). Fall back to Adjust.
+  return ourOnetapUrl(payload) || pickMobileAppUrl(payload, userAgent) || "";
+}
+
+async function skOnetapRedirect(req, res) {
+  const raw = String(req.parsedUrl?.searchParams?.get("deepLinking") || "").trim();
+  const payload = raw.replace(/%24/gi, "$");
+  if (!/^\d+(?:\$[\d.]*){0,30}$/.test(payload) || payload.length > 300) {
+    throw createHttpError(400, "Invalid Sharekhan deepLinking payload");
+  }
+  const location = pickMobileAppUrl(payload, req.headers?.["user-agent"] || "");
+  if (!location) throw createHttpError(404, "Sharekhan app link unavailable");
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+  });
+  res.end();
 }
 
 // Matches Sharekhan's own link format: 131$<exchange>$<scrip>$<side>$<price>$<qty>, NSE = 11, empty price = market.
@@ -64,12 +114,34 @@ function intentPayload(record) {
 
 function publicRecord(record, req) {
   const base = (process.env.PUBLIC_API_URL || "https://api.emotionlesstraders.com").replace(/\/$/, "");
-  if (record.kind === "order-intent" && !record.payload) return { code: record.code,
-    shortUrl: `https://www.emotionlesstraders.com/order/${record.code}`,
-    details: record.details, kind: record.kind, active: record.active,
-    createdAt: record.createdAt, clicks: record.clicks || 0 };
-  return { code: record.code, shortUrl: `${base}/l/${record.code}`, destination: onetapUrl(intentPayload(record), record.details),
-    details: record.details, kind: record.kind || "sharekhan-deeplink", active: record.active, createdAt: record.createdAt, clicks: record.clicks || 0 };
+  const payload = intentPayload(record);
+  const apps = mobileAppUrls(payload);
+  if (record.kind === "order-intent") {
+    return {
+      code: record.code,
+      shortUrl: `https://www.emotionlesstraders.com/order/${record.code}`,
+      destination: apps.android || apps.ios || "",
+      androidAppUrl: apps.android,
+      iosAppUrl: apps.ios,
+      details: record.details,
+      kind: record.kind,
+      active: record.active,
+      createdAt: record.createdAt,
+      clicks: record.clicks || 0,
+    };
+  }
+  return {
+    code: record.code,
+    shortUrl: `${base}/l/${record.code}`,
+    destination: apps.android || onetapUrl(payload, record.details),
+    androidAppUrl: apps.android,
+    iosAppUrl: apps.ios,
+    details: record.details,
+    kind: record.kind || "sharekhan-deeplink",
+    active: record.active,
+    createdAt: record.createdAt,
+    clicks: record.clicks || 0,
+  };
 }
 
 async function createIntent(req, res) {
@@ -123,9 +195,23 @@ async function createIntent(req, res) {
   const payload = ["NSE", "BSE"].includes(exchange) && segment === "EQ"
     ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
     : "";
+  const card = source.card && typeof source.card === "object" ? {
+    buyRange: String(source.card.buyRange || source.buyRange || price || "").trim().slice(0, 40),
+    target: String(source.card.target || source.target || "").trim().slice(0, 40),
+    stopLoss: String(source.card.stopLoss || source.stopLoss || "").trim().slice(0, 40),
+    timeFrame: String(source.card.timeFrame || source.timeFrame || "").trim().slice(0, 40),
+    headline: String(source.card.headline || source.headline || "").trim().slice(0, 60),
+  } : {
+    buyRange: String(source.buyRange || price || "").trim().slice(0, 40),
+    target: String(source.target || "").trim().slice(0, 40),
+    stopLoss: String(source.stopLoss || "").trim().slice(0, 40),
+    timeFrame: String(source.timeFrame || "").trim().slice(0, 40),
+    headline: String(source.headline || "").trim().slice(0, 60),
+  };
   const details = { stock, tradingSymbol, side, quantity, price, exchange, segment, scripCode,
     orderType, productType, validity, triggerPrice,
     bracket,
+    card,
     notes: String(source.notes || "").trim().slice(0, 500) };
   const record = { code: crypto.randomBytes(12).toString("base64url"), kind: "order-intent", payload, details,
     active: true, clicks: 0, createdAt: new Date(), createdBy: req.user.sub };
@@ -139,7 +225,18 @@ async function getIntent(req, res) {
   await collection().updateOne({ _id: record._id }, { $inc: { clicks: 1 } });
   res.setHeader("Cache-Control", "no-store");
   const payload = intentPayload(record);
-  sendJson(res, 200, { ok: true, details: record.details, appUrl: webTradeUrl(record.details) });
+  const apps = mobileAppUrls(payload);
+  const ua = req.headers?.["user-agent"] || "";
+  const appUrl = ourOnetapUrl(payload) || pickMobileAppUrl(payload, ua) || "";
+  sendJson(res, 200, {
+    ok: true,
+    details: record.details,
+    payload,
+    appUrl,
+    androidAppUrl: apps.android,
+    iosAppUrl: apps.ios,
+    schemeUrl: apps.scheme,
+  });
 }
 
 async function create(req, res) {
@@ -165,13 +262,65 @@ async function deactivate(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
+function publicOrderUrl(record) {
+  if (record?.kind === "order-intent") {
+    return `https://www.emotionlesstraders.com/order/${record.code}`;
+  }
+  const base = publicApiBase();
+  return `${base}/l/${record.code}`;
+}
+
+async function getLinkQr(req, res) {
+  const record = await collection().findOne({ code: req.params.code, active: true });
+  if (!record) throw createHttpError(404, "Link not found or inactive");
+  const targetUrl = publicOrderUrl(record);
+  const png = await QRCode.toBuffer(targetUrl, {
+    type: "png",
+    width: 512,
+    margin: 1,
+    errorCorrectionLevel: "M",
+    color: { dark: "#111111", light: "#ffffff" },
+  });
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Cache-Control": "public, max-age=300",
+    "Content-Length": png.length,
+  });
+  res.end(png);
+}
+
 async function redirect(req, res) {
   const record = await collection().findOne({ code: req.params.code, active: true });
-  if (!record?.payload) throw createHttpError(404, "Link not found or inactive");
+  const payload = intentPayload(record);
+  if (!record || !payload) throw createHttpError(404, "Link not found or inactive");
   await collection().updateOne({ _id: record._id }, { $inc: { clicks: 1 } });
-  res.writeHead(302, { Location: onetapUrl(intentPayload(record), record.details),
-    "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+  const location =
+    onetapUrl(payload, record.details, req.headers?.["user-agent"] || "") ||
+    `https://www.emotionlesstraders.com/order/${record.code}`;
+  if (!location.startsWith("http")) {
+    throw createHttpError(404, "Sharekhan app link unavailable for this order");
+  }
+  res.writeHead(302, {
+    Location: location,
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+  });
   res.end();
 }
 
-module.exports = { create, createIntent, getIntent, list, deactivate, redirect, parsePayload, buildOrderDeepLink, webTradeUrl };
+module.exports = {
+  create,
+  createIntent,
+  getIntent,
+  list,
+  deactivate,
+  getLinkQr,
+  redirect,
+  skOnetapRedirect,
+  parsePayload,
+  buildOrderDeepLink,
+  webTradeUrl,
+  mobileAppUrls,
+  pickMobileAppUrl,
+  ourOnetapUrl,
+};

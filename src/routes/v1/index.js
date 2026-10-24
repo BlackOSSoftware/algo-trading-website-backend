@@ -103,9 +103,12 @@ const sharekhanLinks = require("../../controllers/sharekhanLink.controller");
 
 function registerV1Routes(router) {
   router.get("/l/:code", sharekhanLinks.redirect);
+  router.get("/sk-onetap", sharekhanLinks.skOnetapRedirect);
   router.get("/api/v1/order-intents/:code", sharekhanLinks.getIntent);
+  router.get("/api/v1/order-intents/:code/qr.png", sharekhanLinks.getLinkQr);
   router.post("/api/v1/sharekhan/order-intents", requireSharekhan(sharekhanLinks.createIntent));
   router.get("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.list));
+  router.get("/api/v1/sharekhan/links/:code/qr.png", sharekhanLinks.getLinkQr);
   router.get("/api/v1/sharekhan/instruments/search", requireSharekhan(searchSharekhanInstruments));
   router.get("/api/v1/sharekhan/instruments/expiries", requireSharekhan(listSharekhanExpiries));
   router.post("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.create));
