@@ -18,6 +18,8 @@ const DEFAULT_TRADE_WINDOW_END = "15:30";
 const ALLOWED_CALL_TYPE_FALLBACKS = new Set([
   "BUY",
   "SELL",
+  "SHORT SELL",
+  "SHORT SELL COVER",
   "BUY EXIT",
   "SELL EXIT",
   "BUY ADD",
@@ -75,7 +77,10 @@ function normalizeStoredTime(value, fallback) {
 }
 
 function normalizeTradeAction(value) {
-  return normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+  let raw = normalizeString(value).toUpperCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (raw === "SHORTSELL") raw = "SHORT SELL";
+  if (raw === "SHORTSELL COVER" || raw === "SHORT COVER") raw = "SHORT SELL COVER";
+  return raw;
 }
 
 function normalizeExpiryDate(value, label) {
@@ -342,11 +347,31 @@ function normalizeMarketMayaConfig(value, globalMStockConfig = {}) {
   if (callTypeFallback && !ALLOWED_CALL_TYPE_FALLBACKS.has(callTypeFallback)) {
     throw createHttpError(
       400,
-      "marketMaya.callTypeFallback must be BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT"
+      "marketMaya.callTypeFallback must be BUY, SELL, SHORT SELL, SHORT SELL COVER, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT"
     );
   }
   const orderType = normalizeString(value.orderType || value.order_type).toUpperCase();
   const limitPrice = normalizeString(value.limitPrice || value.limit_price);
+  const sharekhanTriggerSourceRaw = normalizeString(
+    value.sharekhanTriggerSource ?? value.sharekhan_trigger_source
+  ).toLowerCase();
+  const sharekhanTriggerSource =
+    sharekhanTriggerSourceRaw === "fixed" || sharekhanTriggerSourceRaw === "manual"
+      ? "fixed"
+      : sharekhanTriggerSourceRaw === "chartink" || sharekhanTriggerSourceRaw === "trigger"
+        ? "chartink"
+        : "none";
+  const sharekhanTriggerPriceRaw = normalizeString(
+    value.sharekhanTriggerPrice ?? value.sharekhan_trigger_price
+  );
+  let sharekhanTriggerPrice = "";
+  if (sharekhanTriggerSource === "fixed" && sharekhanTriggerPriceRaw && sharekhanTriggerPriceRaw !== "0") {
+    const numeric = Number(sharekhanTriggerPriceRaw);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      throw createHttpError(400, "Sharekhan trigger price must be 0 or a positive number");
+    }
+    sharekhanTriggerPrice = String(Number(numeric.toFixed(2)));
+  }
   const limitPriceSource = normalizeLimitPriceSource(
     value.limitPriceSource ?? value.limit_price_source ?? value.priceSource ?? value.price_source,
     limitPrice
@@ -664,6 +689,8 @@ function normalizeMarketMayaConfig(value, globalMStockConfig = {}) {
     ...(orderType ? { orderType } : {}),
     ...(limitPriceSource ? { limitPriceSource } : {}),
     ...(limitPrice ? { limitPrice } : {}),
+    ...(orderType === "LIMIT" ? { sharekhanTriggerSource } : {}),
+    ...(orderType === "LIMIT" && sharekhanTriggerPrice ? { sharekhanTriggerPrice } : {}),
     ...(explicitMStockApiType ? { mStockApiType: explicitMStockApiType } : {}),
     ...(explicitMStockApiKey ? { mStockApiKey: explicitMStockApiKey } : {}),
     ...(explicitMStockAuthToken ? { mStockAuthToken: explicitMStockAuthToken } : {}),

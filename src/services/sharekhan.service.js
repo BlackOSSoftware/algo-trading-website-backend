@@ -1,5 +1,11 @@
 const crypto = require("crypto");
-const { resolveInstrumentForOrder } = require("../models/mstockInstrument.model");
+const { getDb } = require("../config/db");
+const {
+  resolveInstrumentForOrder,
+  replaceExchangeInstruments,
+  countInstrumentsByExchange,
+  latestInstrumentSync,
+} = require("../models/mstockInstrument.model");
 const https = require("https");
 const { getSharekhanStreamPrice } = require("./sharekhanMarketData.service");
 
@@ -42,9 +48,31 @@ function getTimeoutMs() {
   return Math.min(raw, 60000);
 }
 
-function mapCallTypeToTransaction(callType) {
-  const raw = normalizeString(callType).toUpperCase();
+function canonicalCallType(callType) {
+  return normalizeString(callType).toUpperCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+}
+
+function isCashSegment(segment) {
+  const seg = normalizeString(segment).toUpperCase();
+  return !seg || seg === "EQ" || seg === "NC" || seg === "BC" || seg === "NSE" || seg === "BSE";
+}
+
+function isShortSellCall(callType) {
+  const raw = canonicalCallType(callType);
+  return raw === "SHORT SELL" || raw === "SHORTSELL";
+}
+
+function isShortCoverCall(callType) {
+  const raw = canonicalCallType(callType);
+  return raw === "SHORT SELL COVER" || raw === "SHORTSELL COVER" || raw === "SHORT COVER";
+}
+
+function mapCallTypeToTransaction(callType, segment) {
+  const raw = canonicalCallType(callType);
   if (!raw) return "";
+  const cash = isCashSegment(segment);
+  if (isShortSellCall(raw)) return cash ? "SM" : "S";
+  if (isShortCoverCall(raw)) return cash ? "BM" : "B";
   if (raw === "BUY" || raw === "BUY ADD" || raw === "B") return "B";
   if (raw === "SELL" || raw === "SELL ADD" || raw === "S") return "S";
   if (raw === "BUY EXIT" || raw === "PARTIAL BUY EXIT") return "S";
@@ -54,12 +82,41 @@ function mapCallTypeToTransaction(callType) {
   return "";
 }
 
+function isBuyTransaction(transactionType) {
+  return transactionType === "B" || transactionType === "BM";
+}
+
+function tickDecimals(tick) {
+  const text = String(tick);
+  const fraction = text.includes(".") ? text.split(".")[1].replace(/0+$/, "") : "";
+  return fraction.length;
+}
+
+function snapPriceToTick(price, tickSize, transactionType) {
+  const numeric = Number(price);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  const tick = Number(tickSize);
+  if (!Number.isFinite(tick) || tick <= 0) {
+    return String(Number(numeric.toFixed(2)));
+  }
+  const steps = numeric / tick;
+  const snappedSteps = isBuyTransaction(transactionType)
+    ? Math.ceil(steps - 1e-8)
+    : Math.floor(steps + 1e-8);
+  const snapped = snappedSteps * tick;
+  if (!Number.isFinite(snapped) || snapped <= 0) return "";
+  return snapped.toFixed(tickDecimals(tick));
+}
+
 function mapExchangeCode(exchange) {
   const key = normalizeString(exchange).toUpperCase();
   return EXCHANGE_MAP[key] || key;
 }
 
-function resolveProductType({ segment, productType }) {
+function resolveProductType({ segment, productType, callType }) {
+  if ((isShortSellCall(callType) || isShortCoverCall(callType)) && isCashSegment(segment)) {
+    return "BIGTRADE";
+  }
   const explicit = normalizeString(productType).toUpperCase();
   if (["INVESTMENT", "INV", "BIGTRADE", "BT", "BIGTRADEPLUS", "BT+"].includes(explicit)) {
     if (explicit === "INV") return "INVESTMENT";
@@ -247,7 +304,7 @@ async function getSharekhanLivePrice({ exchange, scripCode }) {
   return getSharekhanStreamPrice({ exchange: resolvedExchange, scripCode: resolvedScripCode });
 }
 
-function fetchSharekhanNodeHttp(url, { method = "GET", headers = {}, body = null } = {}) {
+function fetchSharekhanNodeHttp(url, { method = "GET", headers = {}, body = null, timeoutMs = 0 } = {}) {
   return new Promise((resolve) => {
     const parsed = new URL(url);
     const requestHeaders = { ...headers };
@@ -262,7 +319,7 @@ function fetchSharekhanNodeHttp(url, { method = "GET", headers = {}, body = null
         path: `${parsed.pathname}${parsed.search}`,
         method,
         headers: requestHeaders,
-        timeout: getTimeoutMs(),
+        timeout: timeoutMs > 0 ? timeoutMs : getTimeoutMs(),
       },
       (res) => {
         const chunks = [];
@@ -315,6 +372,7 @@ async function placeSharekhanOrder({
   price = "0",
   triggerPrice = "0",
   orderType = "NORMAL",
+  priceMode = "",
   afterHour = "N",
   validity = "GFD",
 }) {
@@ -323,7 +381,7 @@ async function placeSharekhanOrder({
   const resolvedCustomerId = normalizeString(customerId);
   const resolvedChannelUser = normalizeString(channelUser) || resolvedCustomerId;
 
-  const transactionType = mapCallTypeToTransaction(callType);
+  const transactionType = mapCallTypeToTransaction(callType, segment);
   if (!transactionType) {
     return { ok: false, dryRun: true, error: "Invalid call_type for Sharekhan order" };
   }
@@ -387,16 +445,53 @@ async function placeSharekhanOrder({
     exchange: sharekhanExchange,
     transactionType,
     quantity: Number(qty) || qty,
-    productType: resolveProductType({ segment, productType }),
+    productType: resolveProductType({ segment, productType, callType }),
   };
-  let resolvedLimitPrice = normalizePositivePrice(price);
+  const explicitPrice = normalizePositivePrice(price);
+  const requestedMode = normalizeString(priceMode).toUpperCase();
+  const wantsLimit = requestedMode === "LIMIT" || (requestedMode !== "MARKET" && Boolean(explicitPrice));
+  let resolvedLimitPrice = "";
   let priceLookup = null;
-  if (isTruthy(execute) || !resolvedLimitPrice) {
+  let marketCushion = null;
+
+  if (wantsLimit) {
+    resolvedLimitPrice = explicitPrice;
+  } else {
     priceLookup = await getSharekhanLivePrice({
       exchange: sharekhanExchange,
       scripCode,
     });
-    resolvedLimitPrice = priceLookup.ok ? normalizePositivePrice(priceLookup.price) : "";
+    const buySide = isBuyTransaction(transactionType);
+    const bookPrice = priceLookup.ok ? (buySide ? priceLookup.ask : priceLookup.bid) : "";
+    resolvedLimitPrice = normalizePositivePrice(bookPrice);
+    if (!resolvedLimitPrice && priceLookup.ok) {
+      priceLookup = {
+        ...priceLookup,
+        ok: false,
+        error: buySide
+          ? "Sharekhan ask price is not available. Order was not sent."
+          : "Sharekhan bid price is not available. Order was not sent.",
+      };
+    }
+    if (resolvedLimitPrice) {
+      marketCushion = {
+        side: buySide ? "BUY" : "SELL",
+        source: buySide ? "ASK" : "BID",
+        bid: normalizePositivePrice(priceLookup.bid),
+        ask: normalizePositivePrice(priceLookup.ask),
+        ltp: normalizePositivePrice(priceLookup.price),
+        orderPrice: resolvedLimitPrice,
+      };
+    }
+  }
+
+  const tickedPrice = snapPriceToTick(resolvedLimitPrice, instrument.tickSize, transactionType);
+  if (tickedPrice) {
+    resolvedLimitPrice = tickedPrice;
+    if (marketCushion) {
+      marketCushion.orderPrice = tickedPrice;
+      marketCushion.tickSize = normalizeString(instrument.tickSize);
+    }
   }
 
   if (!resolvedLimitPrice) {
@@ -404,9 +499,11 @@ async function placeSharekhanOrder({
       ok: false,
       dryRun: !isTruthy(execute),
       broker: "sharekhan",
-      error:
-        priceLookup?.error ||
-        "Sharekhan LIMIT order needs a live price. Order was not sent because market orders are disabled.",
+      error: wantsLimit
+        ? "Limit price is required. The live market price was not used."
+        : priceLookup?.error ||
+          "Sharekhan market order needs a live price. Order was not sent.",
+      marketCushion,
       status: priceLookup?.status || null,
       expired: Boolean(priceLookup?.expired),
       priceLookup,
@@ -463,6 +560,7 @@ async function placeSharekhanOrder({
       credentialsReady: Boolean(resolvedApiKey && resolvedAccessToken && resolvedCustomerId),
       preview: orderBody,
       priceLookup,
+      marketCushion,
       instrument: instrumentSummary,
     };
   }
@@ -949,6 +1047,123 @@ async function getSharekhanPositions({ apiKey, accessToken, customerId }) {
   };
 }
 
+function parseSharekhanExpiry(value) {
+  const raw = normalizeString(value);
+  const slash = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(raw);
+  if (slash) return new Date(Number(slash[3]), Number(slash[2]) - 1, Number(slash[1]));
+  const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw);
+  if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  return null;
+}
+
+function mapSharekhanMasterRow(row) {
+  const symbol = normalizeString(row?.tradingSymbol).toUpperCase();
+  const token = normalizeString(row?.scripCode);
+  if (!symbol || !/^[1-9]\d*$/.test(token)) return null;
+
+  const expiryDate = parseSharekhanExpiry(row?.expiry);
+  if (!expiryDate) return null;
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 1);
+  if (expiryDate < cutoff) return null;
+
+  const optionType = normalizeString(row?.optionType).toUpperCase();
+  const instType = normalizeString(row?.instType).toUpperCase();
+  const isOption = optionType === "CE" || optionType === "PE" || /OPT/.test(instType);
+  const strike = Number(row?.strike);
+  const lotSize = Number(row?.lotSize);
+  const tickSize = Number(row?.tickSize);
+  const expiry = normalizeString(row?.expiry);
+
+  return {
+    token,
+    symbol,
+    name: [symbol, expiry, isOption ? optionType : "", isOption && strike > 0 ? String(strike) : ""]
+      .filter(Boolean)
+      .join(" "),
+    exchange: "MCX",
+    instrumenttype: isOption ? "OPTFUT" : "FUT",
+    expiry,
+    strike: isOption && Number.isFinite(strike) && strike > 0 ? String(strike) : "",
+    lotsize: Number.isFinite(lotSize) && lotSize > 0 ? String(lotSize) : "",
+    tick_size: Number.isFinite(tickSize) && tickSize > 0 ? String(tickSize) : "",
+  };
+}
+
+let mcxSyncPromise = null;
+let mcxSyncFailedAt = 0;
+
+async function syncSharekhanMcxInstruments() {
+  const users = await getDb()
+    .collection("users")
+    .find({
+      "sharekhan.apiKey": { $exists: true, $ne: "" },
+      "sharekhan.accessToken": { $exists: true, $ne: "" },
+    })
+    .project({ "sharekhan.apiKey": 1, "sharekhan.accessToken": 1 })
+    .limit(8)
+    .toArray();
+
+  let lastError = "No connected Sharekhan session is available to load MCX contracts";
+  for (const user of users) {
+    const response = await fetchSharekhanNodeHttp(`${DEFAULT_BASE_URL}/skapi/services/master/MX`, {
+      method: "GET",
+      headers: buildSharekhanHeaders({
+        apiKey: user?.sharekhan?.apiKey,
+        accessToken: user?.sharekhan?.accessToken,
+      }),
+      timeoutMs: 45000,
+    });
+    if (!response.ok || !Array.isArray(response.payload?.data)) {
+      lastError = extractErrorMessage(response.payload, response.status);
+      continue;
+    }
+
+    const mapped = response.payload.data.map(mapSharekhanMasterRow).filter(Boolean);
+    if (!mapped.length) {
+      lastError = "Sharekhan MCX master did not include tradable contracts";
+      continue;
+    }
+
+    const stored = await replaceExchangeInstruments("MCX", mapped);
+    return {
+      ok: stored.totalStored > 0,
+      skipped: false,
+      fetched: response.payload.data.length,
+      mapped: mapped.length,
+      totalStored: stored.totalStored,
+      syncedAt: stored.syncedAt,
+      error: stored.totalStored > 0 ? null : lastError,
+    };
+  }
+
+  return { ok: false, skipped: false, error: lastError };
+}
+
+async function ensureSharekhanMcxInstruments() {
+  if (mcxSyncPromise) return mcxSyncPromise;
+  if (Date.now() - mcxSyncFailedAt < 60 * 1000) {
+    return { ok: false, skipped: true, error: "MCX contract sync is cooling down" };
+  }
+
+  mcxSyncPromise = (async () => {
+    const count = await countInstrumentsByExchange("MCX");
+    const syncedAt = await latestInstrumentSync("MCX");
+    const syncedMs = Date.parse(syncedAt);
+    const fresh = count > 50 && Number.isFinite(syncedMs) && Date.now() - syncedMs < 12 * 60 * 60 * 1000;
+    if (fresh) return { ok: true, skipped: true, count, syncedAt };
+
+    const result = await syncSharekhanMcxInstruments();
+    if (!result.ok) mcxSyncFailedAt = Date.now();
+    return result;
+  })().finally(() => {
+    mcxSyncPromise = null;
+  });
+
+  return mcxSyncPromise;
+}
+
 module.exports = {
   placeSharekhanOrder,
   getSharekhanLivePrice,
@@ -959,4 +1174,5 @@ module.exports = {
   getSharekhanDayOrders,
   getSharekhanPositions,
   checkSharekhanSession,
+  ensureSharekhanMcxInstruments,
 };

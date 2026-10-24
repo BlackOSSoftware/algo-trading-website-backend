@@ -26,6 +26,8 @@ const TRADE_WINDOW_TIME_ZONE_LABEL =
 const ALLOWED_CALL_TYPES = new Set([
   "BUY",
   "SELL",
+  "SHORT SELL",
+  "SHORT SELL COVER",
   "BUY EXIT",
   "SELL EXIT",
   "BUY ADD",
@@ -97,8 +99,15 @@ function normalizeTradeWindowValue(value, fallback) {
   return normalizeClockTime(value, fallback);
 }
 
+function canonicalTradeAction(value) {
+  let raw = normalizeString(value).toUpperCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  if (raw === "SHORTSELL") raw = "SHORT SELL";
+  if (raw === "SHORTSELL COVER" || raw === "SHORT COVER") raw = "SHORT SELL COVER";
+  return raw;
+}
+
 function normalizeTradeAction(value) {
-  const raw = normalizeString(value).toUpperCase().replace(/\s+/g, " ");
+  const raw = canonicalTradeAction(value);
   return ALLOWED_CALL_TYPES.has(raw) ? raw : "";
 }
 
@@ -116,7 +125,7 @@ function stripExitOnlyParams(params) {
 }
 
 // Market Maya no longer accepts these — strip even if present in extraParams/payloadMap.
-const REMOVED_TRADE_PARAM_KEYS = ["order_type", "price"];
+const REMOVED_TRADE_PARAM_KEYS = ["order_type", "price", "sharekhan_trigger_price"];
 
 function stripRemovedTradeParams(params) {
   const sanitized = { ...(params || {}) };
@@ -538,6 +547,63 @@ function resolveTriggerPrice(payload, cfg, symbol) {
   return parsedPrices.find((price) => price !== null) ?? null;
 }
 
+function resolveChartinkTriggerPrice(payload, cfg, symbol) {
+  const directPrice = normalizePositiveNumber(
+    readFirstPayloadValue(payload, ["trigger_price", "triggerPrice"])
+  );
+  if (directPrice) return directPrice;
+
+  const priceItems = splitPayloadList(
+    readFirstPayloadValue(payload, ["trigger_prices", "triggerPrices"])
+  );
+  if (!priceItems.length) return null;
+
+  const parsedPrices = priceItems.map((item) => normalizePositiveNumber(item));
+  const targetSymbol = normalizeString(symbol).toUpperCase();
+  if (targetSymbol) {
+    const symbols = getTriggerPriceSymbolOrder(payload, cfg);
+    const symbolIndex = symbols.findIndex(
+      (item) => normalizeString(item).toUpperCase() === targetSymbol
+    );
+    if (symbolIndex >= 0 && parsedPrices[symbolIndex]) {
+      return parsedPrices[symbolIndex];
+    }
+  }
+
+  return parsedPrices.find((price) => price !== null) ?? null;
+}
+
+function normalizeSharekhanTriggerSource(value) {
+  const raw = normalizeString(value).toLowerCase();
+  if (raw === "fixed" || raw === "manual") return "fixed";
+  if (raw === "chartink" || raw === "trigger") return "chartink";
+  return "none";
+}
+
+function formatSharekhanTrigger(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0";
+  return String(Number(numeric.toFixed(2)));
+}
+
+function resolveSharekhanOrderTrigger({ orderType, exitTrade, payload, cfg, symbol }) {
+  if (exitTrade || toUpper(orderType) !== "LIMIT") return "0";
+  const source = normalizeSharekhanTriggerSource(
+    readFirstPayloadValue(payload, ["sharekhan_trigger_source", "sharekhanTriggerSource"]) ||
+      cfg.sharekhanTriggerSource
+  );
+  if (source === "fixed") {
+    return formatSharekhanTrigger(
+      readFirstPayloadValue(payload, ["sharekhan_trigger_price", "sharekhanTriggerPrice"]) ??
+        cfg.sharekhanTriggerPrice
+    );
+  }
+  if (source === "chartink") {
+    return formatSharekhanTrigger(resolveChartinkTriggerPrice(payload, cfg, symbol));
+  }
+  return "0";
+}
+
 function resolvePayloadCandlePrice(payload, cfg, symbol, source) {
   const field =
     source === "mstockLow"
@@ -866,8 +932,9 @@ function applyBufferToPrice(triggerPrice, bufferValue, callType, bufferBy) {
   if (!Number.isFinite(offset) || offset < 0) return null;
   if (offset === 0) return triggerPrice;
 
-  const side = toUpper(callType);
-  const adjusted = side === "SELL" ? triggerPrice - offset : triggerPrice + offset;
+  const side = toUpper(callType).replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+  const sellSide = side === "SELL" || side === "SHORT SELL" || side === "SHORTSELL";
+  const adjusted = sellSide ? triggerPrice - offset : triggerPrice + offset;
   if (!Number.isFinite(adjusted) || adjusted <= 0) return null;
   return adjusted;
 }
@@ -1047,8 +1114,10 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
     ? ""
     : normalizeString(readFirstPayloadValue(payload, ["limit_price", "limitPrice"])) ||
       normalizeString(cfg.limitPrice);
-  const limitPriceSource =
-    sharekhanPrices ? "sharekhanLive" : limitPriceSourceConfigured || (limitPriceRawCandidate ? "fixed" : "trigger");
+  const sharekhanMarketPricing = Boolean(sharekhanPrices) && orderType !== "LIMIT";
+  const limitPriceSource = sharekhanMarketPricing
+    ? "sharekhanLive"
+    : limitPriceSourceConfigured || (limitPriceRawCandidate ? "fixed" : "trigger");
   const limitPriceRaw = limitPriceSource === "fixed" ? limitPriceRawCandidate : "";
   const hasLimitPrice = Boolean(limitPriceRaw);
   const limitPriceNumeric = normalizePositiveNumber(limitPriceRaw);
@@ -1066,7 +1135,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   const mStockCandleInterval = normalizeString(cfg.mStockInterval) || "";
   const mStockCandleOffset = normalizePositiveInt(cfg.mStockCandleOffset) || 1;
 
-  if (sharekhanPrices && !exitTrade) {
+  if (sharekhanMarketPricing && !exitTrade) {
     const resolved = await resolveInstrumentForOrder({ symbol, symbolToken: symbolCode, exchange, segment });
     const quote = resolved?.token
       ? await getSharekhanLivePrice({ exchange: resolved.exchange || exchange, scripCode: resolved.token })
@@ -1126,7 +1195,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
   const bufferBy = normalizeBufferBy(bufferByRaw);
   const bufferValue = normalizeNonNegativeNumber(bufferValueRaw);
   const bufferActive =
-    !sharekhanPrices && orderType === "LIMIT" && limitPriceSource !== "fixed" && Boolean(bufferBy);
+    orderType === "LIMIT" && limitPriceSource !== "fixed" && Boolean(bufferBy);
   const bufferedPrice = bufferActive
     ? applyBufferToPrice(dynamicSourcePrice, bufferValue, callType, bufferBy)
     : null;
@@ -1145,6 +1214,13 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       : null;
   const priceForLimitOrder =
     orderType === "LIMIT" && limitPriceResolved ? formatNumber(limitPriceResolved) : "";
+  const sharekhanOrderTrigger = resolveSharekhanOrderTrigger({
+    orderType,
+    exitTrade,
+    payload,
+    cfg,
+    symbol: symbol || symbolCode || "",
+  });
 
   const qtyDistribution = exitTrade
     ? ""
@@ -1272,6 +1348,7 @@ async function buildBaseParams({ strategy, payload, symbol, symbolCode, received
       ...(callType ? { call_type: callType } : {}),
       ...(orderType ? { order_type: orderType } : {}),
       ...(priceForLimitOrder ? { price: priceForLimitOrder } : {}),
+      sharekhan_trigger_price: sharekhanOrderTrigger,
       ...(resolvedQtyDistribution ? { qty_distribution: resolvedQtyDistribution } : {}),
       ...(resolvedQtyValue ? { qty_value: resolvedQtyValue } : {}),
       ...(targetBy ? { target_by: targetBy } : {}),
@@ -1442,7 +1519,7 @@ function validateMinimumParams(params) {
   params.exchange = exchange;
   if (!callType) return "call_type is required";
   if (!ALLOWED_CALL_TYPES.has(callType)) {
-    return "call_type must be BUY, SELL, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT";
+    return "call_type must be BUY, SELL, SHORT SELL, SHORT SELL COVER, BUY EXIT, SELL EXIT, BUY ADD, SELL ADD, PARTIAL BUY EXIT, or PARTIAL SELL EXIT";
   }
   params.call_type = callType;
   if (!symbolCode && !symbol) return "symbol or symbol_code is required";
@@ -1761,7 +1838,9 @@ async function executeStrategyAutoTrades({ strategy, payload, receivedAt, sharek
         callType: params.call_type,
         quantity: params.qty_value || "1",
         productType: cfg.sharekhanProductType,
-        price: sharekhanPrice,
+        price: toUpper(params.order_type) === "LIMIT" ? sharekhanPrice : "",
+        priceMode: toUpper(params.order_type) === "LIMIT" ? "LIMIT" : "MARKET",
+        triggerPrice: params.sharekhan_trigger_price || "0",
         orderType: "NORMAL",
       });
       const resolvedSharekhanPrice =

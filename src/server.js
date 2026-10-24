@@ -6,7 +6,7 @@ const { registerRoutes } = require("./routes");
 const { notFound } = require("./middlewares/notFound");
 const { errorHandler } = require("./middlewares/errorHandler");
 const { connectMongo, closeMongo } = require("./config/db");
-const { ensureAdminSeed } = require("./services/user.service");
+const { ensureAdminSeed, ensureSharekhanSeed } = require("./services/user.service");
 const {
   syncTelegramWebhook,
 } = require("./services/telegramWebhook.service");
@@ -16,6 +16,7 @@ const {
 } = require("./services/telegramPolling.service");
 
 const { startSharekhanMarketData, closeSharekhanStreams } = require("./services/sharekhanMarketData.service");
+const { ensureSharekhanMcxInstruments } = require("./services/sharekhan.service");
 
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -66,6 +67,7 @@ function setCorsHeaders(req, res) {
 async function startServer() {
   await connectMongo();
   await ensureAdminSeed();
+  await ensureSharekhanSeed();
   await startSharekhanMarketData();
   await syncTelegramWebhook();
   startTelegramPolling();
@@ -94,6 +96,19 @@ async function startServer() {
 
   server.listen(PORT, () => {
     console.log(`Backend listening on http://localhost:${PORT}`);
+    ensureSharekhanMcxInstruments()
+      .then((result) => {
+        if (result?.ok) {
+          console.log(
+            `Sharekhan MCX contracts ${result.skipped ? "already loaded" : "synced"} (${result.totalStored || result.count || 0})`
+          );
+        } else if (result?.error) {
+          console.error("Sharekhan MCX contract sync failed:", result.error);
+        }
+      })
+      .catch((err) => {
+        console.error("Sharekhan MCX contract sync failed:", err instanceof Error ? err.message : err);
+      });
   });
 
   const shutdown = async () => {

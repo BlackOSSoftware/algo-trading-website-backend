@@ -215,6 +215,18 @@ async function adminLogin(req, res) {
   }
 }
 
+async function sharekhanLogin(req, res) {
+  const body = await parseBody(req);
+  const email = (body.email || "").trim().toLowerCase();
+  const password = body.password || "";
+  validateCredentials(email, password);
+  const user = await findUserByEmail(email);
+  if (!user || user.role !== "sharekhan" || !user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
+    throw createHttpError(401, "Invalid Sharekhan credentials");
+  }
+  sendJson(res, 200, { ok: true, token: signToken(user), user: sanitizeUser(user) });
+}
+
 async function me(req, res) {
   const userId = req.user?.sub;
   if (!userId) {
@@ -281,6 +293,7 @@ module.exports = {
   register,
   login,
   adminLogin,
+  sharekhanLogin,
   me,
   verifyOtp,
 };

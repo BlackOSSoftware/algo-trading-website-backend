@@ -55,18 +55,24 @@ function pruneExpired() {
   if (changed) persist();
 }
 
-function getSession(userId) {
-  pruneExpired();
+function sessionKey(userId, scope) {
   const key = String(userId || "").trim();
+  if (!key) return "";
+  return scope === "manual" ? `${key}:manual` : key;
+}
+
+function getSession(userId, scope) {
+  pruneExpired();
+  const key = sessionKey(userId, scope);
   if (!key) return null;
   return sessions.get(key) || null;
 }
 
-function touchSession(userId, patch) {
+function touchSession(userId, patch, scope) {
   ensureLoaded();
-  const key = String(userId || "").trim();
+  const key = sessionKey(userId, scope);
   if (!key) return null;
-  const current = getSession(key) || {};
+  const current = sessions.get(key) || {};
   const next = {
     ...current,
     ...patch,
@@ -77,29 +83,37 @@ function touchSession(userId, patch) {
   return next;
 }
 
-function saveSharekhanLoginPrep(userId, prep) {
-  return touchSession(userId, {
-    prep: prep && typeof prep === "object" ? prep : null,
-    result: null,
-  });
+function saveSharekhanLoginPrep(userId, prep, scope) {
+  return touchSession(
+    userId,
+    {
+      prep: prep && typeof prep === "object" ? prep : null,
+      result: null,
+    },
+    scope
+  );
 }
 
-function getSharekhanLoginPrep(userId) {
-  return getSession(userId)?.prep || null;
+function getSharekhanLoginPrep(userId, scope) {
+  return getSession(userId, scope)?.prep || null;
 }
 
-function saveSharekhanLoginResult(userId, result) {
-  return touchSession(userId, {
-    result: result && typeof result === "object" ? result : null,
-  });
+function saveSharekhanLoginResult(userId, result, scope) {
+  return touchSession(
+    userId,
+    {
+      result: result && typeof result === "object" ? result : null,
+    },
+    scope
+  );
 }
 
-function takeSharekhanLoginResult(userId) {
-  const session = getSession(userId);
+function takeSharekhanLoginResult(userId, scope) {
+  const session = getSession(userId, scope);
   if (!session?.result) return null;
   const result = session.result;
   // Keep prep after success too so a refresh/retry does not force retyping keys.
-  touchSession(userId, { result: null });
+  touchSession(userId, { result: null }, scope);
   return result;
 }
 

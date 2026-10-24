@@ -116,14 +116,28 @@ class SharekhanStream {
       const key = `${tick.exchangeCode}${tick.scripCode}`;
       const waiters = this.pending.get(key);
       const price = Number(tick.ltp);
+      const bid = Number(tick.bidPrice ?? tick.bid);
+      const ask = Number(tick.offPrice ?? tick.askPrice ?? tick.ask);
       if (!this.subscriptions.has(key) || !Number.isFinite(price) || price <= 0) continue;
       const timestamp = feedTime(tick.lastUpdatedTime || message.timestamp);
       const age = Date.now() - timestamp;
       const maxAge = setting("SHAREKHAN_WS_MAX_TICK_AGE_MS", 5000, 60000);
       if (!Number.isFinite(timestamp) || age > maxAge || age < -5000) continue;
-      const quote = { ok: true, price: String(price),
-        result: { exchange: tick.exchangeCode, scripCode: tick.scripCode, ltp: price,
-          timestamp: new Date(timestamp).toISOString(), receivedAt: new Date().toISOString() } };
+      const quote = {
+        ok: true,
+        price: String(price),
+        bid: Number.isFinite(bid) && bid > 0 ? String(bid) : "",
+        ask: Number.isFinite(ask) && ask > 0 ? String(ask) : "",
+        result: {
+          exchange: tick.exchangeCode,
+          scripCode: tick.scripCode,
+          ltp: price,
+          bid: Number.isFinite(bid) && bid > 0 ? bid : null,
+          ask: Number.isFinite(ask) && ask > 0 ? ask : null,
+          timestamp: new Date(timestamp).toISOString(),
+          receivedAt: new Date().toISOString(),
+        },
+      };
       this.quotes.set(key, quote);
       this.lastTickAt = quote.result.receivedAt;
       for (const waiter of [...(waiters || [])]) waiter.finish(quote);

@@ -4,6 +4,7 @@ const {
   replaceAllInstruments,
   countInstruments,
   searchInstruments,
+  listInstrumentExpiries,
 } = require("../models/mstockInstrument.model");
 const DEFAULT_BASE_URL = "https://api.mstock.trade";
 const DEFAULT_TIME_ZONE =
@@ -1162,5 +1163,6 @@ module.exports = {
   fetchTypeBScriptMaster,
   syncMStockInstrumentMaster,
   searchMStockInstruments,
+  listInstrumentExpiries,
   getMStockInstrumentCount,
 };

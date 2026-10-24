@@ -7,6 +7,7 @@ const {
   register,
   login,
   adminLogin,
+  sharekhanLogin,
   me,
   verifyOtp,
 } = require("../../controllers/auth.controller");
@@ -71,6 +72,8 @@ const {
   getInstrumentStatsAdmin,
   searchInstrumentsAdmin,
   searchInstruments,
+  searchSharekhanInstruments,
+  listSharekhanExpiries,
 } = require("../../controllers/mstock.controller");
 const {
   placeSharekhanTrade,
@@ -93,7 +96,7 @@ const {
   adminSetCharges,
   adminReview,
 } = require("../../controllers/wallet.controller");
-const { requireAuth, requireAdmin } = require("../../middlewares/auth");
+const { requireAuth, requireAdmin, requireSharekhan } = require("../../middlewares/auth");
 
 const adminSharekhanFeed = require("../../controllers/sharekhanMarketData.controller");
 const sharekhanLinks = require("../../controllers/sharekhanLink.controller");
@@ -101,15 +104,17 @@ const sharekhanLinks = require("../../controllers/sharekhanLink.controller");
 function registerV1Routes(router) {
   router.get("/l/:code", sharekhanLinks.redirect);
   router.get("/api/v1/order-intents/:code", sharekhanLinks.getIntent);
-  router.post("/api/v1/admin/order-intents", requireAdmin(sharekhanLinks.createIntent));
-  router.get("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.list));
-  router.post("/api/v1/admin/sharekhan-links", requireAdmin(sharekhanLinks.create));
-  router.post("/api/v1/admin/sharekhan-links/:code/deactivate", requireAdmin(sharekhanLinks.deactivate));
-  router.get("/api/v1/admin/sharekhan-feed/status", requireAdmin(adminSharekhanFeed.status));
-  router.post("/api/v1/admin/sharekhan-feed/login", requireAdmin(adminSharekhanFeed.login));
-  router.post("/api/v1/admin/sharekhan-feed/complete", requireAdmin(adminSharekhanFeed.complete));
-  router.post("/api/v1/admin/sharekhan-feed/reconnect", requireAdmin(adminSharekhanFeed.reconnect));
-  router.post("/api/v1/admin/sharekhan-feed/disconnect", requireAdmin(adminSharekhanFeed.disconnect));
+  router.post("/api/v1/sharekhan/order-intents", requireSharekhan(sharekhanLinks.createIntent));
+  router.get("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.list));
+  router.get("/api/v1/sharekhan/instruments/search", requireSharekhan(searchSharekhanInstruments));
+  router.get("/api/v1/sharekhan/instruments/expiries", requireSharekhan(listSharekhanExpiries));
+  router.post("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.create));
+  router.post("/api/v1/sharekhan/links/:code/deactivate", requireSharekhan(sharekhanLinks.deactivate));
+  router.get("/api/v1/sharekhan/feed/status", requireSharekhan(adminSharekhanFeed.status));
+  router.post("/api/v1/sharekhan/feed/login", requireSharekhan(adminSharekhanFeed.login));
+  router.post("/api/v1/sharekhan/feed/complete", requireSharekhan(adminSharekhanFeed.complete));
+  router.post("/api/v1/sharekhan/feed/reconnect", requireSharekhan(adminSharekhanFeed.reconnect));
+  router.post("/api/v1/sharekhan/feed/disconnect", requireSharekhan(adminSharekhanFeed.disconnect));
   router.post("/api/v1/webhooks/chartink", chartinkWebhook);
   router.post("/api/v1/webhooks/tradingview", tradingViewWebhook);
   router.post("/api/v1/webhook/razorpay", razorpayWebhook);
@@ -118,6 +123,7 @@ function registerV1Routes(router) {
   router.post("/api/v1/auth/register", register);
   router.post("/api/v1/auth/login", login);
   router.post("/api/v1/auth/admin/login", adminLogin);
+  router.post("/api/v1/auth/sharekhan/login", sharekhanLogin);
   router.post("/api/v1/auth/verify-otp", verifyOtp);
   router.get("/api/v1/auth/me", requireAuth(me));
 

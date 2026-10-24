@@ -10,8 +10,10 @@ const {
   testMStockMarketData,
   syncMStockInstrumentMaster,
   searchMStockInstruments,
+  listInstrumentExpiries,
   getMStockInstrumentCount,
 } = require("../services/mstock.service");
+const { ensureSharekhanMcxInstruments } = require("../services/sharekhan.service");
 
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
 
@@ -483,13 +485,23 @@ async function searchInstrumentsAdmin(req, res) {
   const q = params ? params.get("q") || "" : "";
   const exchange = params ? params.get("exchange") || "" : "";
   const instrumentType = params ? params.get("instrumentType") || "" : "";
+  const segment = params ? params.get("segment") || "" : "";
   const limitRaw = params ? params.get("limit") : null;
   const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
+
+  if (normalizeString(exchange).toUpperCase() === "MCX") {
+    try {
+      await ensureSharekhanMcxInstruments();
+    } catch {
+      // Search still uses whatever contracts are already stored.
+    }
+  }
 
   const instruments = await searchMStockInstruments(q, {
     limit,
     exchange,
     instrumentType,
+    segment,
   });
   sendJson(res, 200, { ok: true, instruments });
 }
@@ -504,15 +516,54 @@ async function searchInstruments(req, res) {
   const q = params ? params.get("q") || "" : "";
   const exchange = params ? params.get("exchange") || "" : "";
   const instrumentType = params ? params.get("instrumentType") || "" : "";
+  const segment = params ? params.get("segment") || "" : "";
   const limitRaw = params ? params.get("limit") : null;
   const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
+
+  if (normalizeString(exchange).toUpperCase() === "MCX") {
+    try {
+      await ensureSharekhanMcxInstruments();
+    } catch {
+      // Search still uses whatever contracts are already stored.
+    }
+  }
 
   const instruments = await searchMStockInstruments(q, {
     limit,
     exchange,
     instrumentType,
+    segment,
   });
   sendJson(res, 200, { ok: true, instruments });
+}
+
+async function searchSharekhanInstruments(req, res) {
+  const params = req.parsedUrl?.searchParams;
+  const q = params ? params.get("q") || "" : "";
+  const exchange = params ? params.get("exchange") || "" : "";
+  const segment = params ? params.get("segment") || "EQ" : "EQ";
+  const expiry = params ? params.get("expiry") || "" : "";
+  const limitRaw = params ? params.get("limit") : null;
+  const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
+  if (q.trim().length < 2 && !expiry) {
+    sendJson(res, 200, { ok: true, instruments: [] });
+    return;
+  }
+  if (exchange === "MCX") {
+    try { await ensureSharekhanMcxInstruments(); } catch { /* serve the local master if refresh fails */ }
+  }
+  const instruments = await searchMStockInstruments(q, { limit, exchange, segment, expiry, instrumentType: segment === "EQ" ? "EQ" : "" });
+  sendJson(res, 200, { ok: true, instruments });
+}
+
+async function listSharekhanExpiries(req, res) {
+  const params = req.parsedUrl?.searchParams;
+  const query = params?.get("q") || "";
+  const exchange = params?.get("exchange") || "";
+  const segment = params?.get("segment") || "";
+  if (exchange === "MCX") { try { await ensureSharekhanMcxInstruments(); } catch { /* use cached master */ } }
+  const expiries = await listInstrumentExpiries({ query, exchange, segment });
+  sendJson(res, 200, { ok: true, expiries });
 }
 
 module.exports = {
@@ -526,4 +577,6 @@ module.exports = {
   getInstrumentStatsAdmin,
   searchInstrumentsAdmin,
   searchInstruments,
+  searchSharekhanInstruments,
+  listSharekhanExpiries,
 };

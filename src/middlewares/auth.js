@@ -40,4 +40,14 @@ function requireAdmin(handler) {
   };
 }
 
-module.exports = { requireAuth, requireAdmin };
+function requireSharekhan(handler) {
+  return async (req, res) => {
+    authenticate(req);
+    if (req.user?.role !== "sharekhan") {
+      throw createHttpError(403, "Forbidden");
+    }
+    return handler(req, res);
+  };
+}
+
+module.exports = { requireAuth, requireAdmin, requireSharekhan };

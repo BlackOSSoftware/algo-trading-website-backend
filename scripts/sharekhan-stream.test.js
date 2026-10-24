@@ -42,8 +42,11 @@ test("accepts broker month/day dates including ambiguous days; rejects invalid a
     tick(sockets[0], { scripCode: 2475, lastUpdatedTime });
     assert.equal(stream.pending.size, 1);
   }
-  tick(sockets[0], { scripCode: 2475, ltp: 230.3, lastUpdatedTime: "09/29/2026 14:51:35" });
-  assert.equal((await result).result.timestamp, "2026-09-29T09:21:35.000Z");
+  tick(sockets[0], { scripCode: 2475, ltp: 230.3, bidPrice: 230.1, offPrice: 230.4, lastUpdatedTime: "09/29/2026 14:51:35" });
+  const quote = await result;
+  assert.equal(quote.result.timestamp, "2026-09-29T09:21:35.000Z");
+  assert.equal(quote.bid, "230.1");
+  assert.equal(quote.ask, "230.4");
   Date.now = () => Date.parse("2026-10-09T14:51:35+05:30");
   const next = stream.getPrice("NC", "2475");
   tick(sockets[0], { scripCode: 2475, lastUpdatedTime: "10/09/2026 14:51:35" });
@@ -146,7 +149,7 @@ test("live order uses stream price despite incoming price; failed lookup sends n
     }
     global.fetch = oldFetch;
   });
-  let lookup = { ok: true, price: "123.45", source: "sharekhanWebSocketLtp" };
+  let lookup = { ok: true, price: "123.45", bid: "123.4", ask: "123.5", source: "sharekhanWebSocketLtp" };
   require.cache[modelPath] = { exports: { resolveInstrumentForOrder: async () => ({ token: "22", symbol: "TEST", exchange: "NSE" }) } };
   require.cache[streamPath] = { exports: { getSharekhanStreamPrice: async (input) => {
     assert.deepEqual(input, { exchange: "NC", scripCode: "22" });
@@ -161,13 +164,17 @@ test("live order uses stream price despite incoming price; failed lookup sends n
     bodies.push(JSON.parse(options.body));
     return { ok: true, status: 200, headers: { get: () => "application/json" }, text: async () => '{"data":{"orderId":"test-order"}}' };
   };
-  const args = { apiKey: "key", accessToken: "token", customerId: "123", execute: true,
-    exchange: "NSE", segment: "EQ", symbol: "TEST", callType: "BUY", quantity: "1", price: "99" };
-  await placeSharekhanOrder(args);
+  const marketArgs = { apiKey: "key", accessToken: "token", customerId: "123", execute: true,
+    exchange: "NSE", segment: "EQ", symbol: "TEST", callType: "BUY", quantity: "1", priceMode: "MARKET" };
+  await placeSharekhanOrder(marketArgs);
   assert.equal(bodies.length, 1);
-  assert.equal(bodies[0].price, "123.45");
+  assert.equal(bodies[0].price, "123.5");
+  const limitArgs = { ...marketArgs, priceMode: "LIMIT", price: "120" };
+  await placeSharekhanOrder(limitArgs);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1].price, "120");
   lookup = { ok: false, error: "No fresh tick" };
-  const failed = await placeSharekhanOrder(args);
+  const failed = await placeSharekhanOrder(marketArgs);
   assert.equal(failed.ok, false);
-  assert.equal(bodies.length, 1);
+  assert.equal(bodies.length, 2);
 });

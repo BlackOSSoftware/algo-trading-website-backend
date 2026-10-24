@@ -31,14 +31,14 @@ function buildPlanWithDuration(planName, durationDays) {
 
 function isPlanActive(user) {
   if (!user) return false;
-  if (user.role === "admin") return true;
+  if (user.role === "admin" || user.role === "sharekhan") return true;
   if (!user.planExpiresAt) return false;
   return new Date(user.planExpiresAt).getTime() > Date.now();
 }
 
 async function ensureUserPlan(user) {
   if (!user) return null;
-  if (user.role === "admin") return user;
+  if (user.role === "admin" || user.role === "sharekhan") return user;
   if (user.planName && user.planExpiresAt) return user;
   const plan = buildPlan("free");
   return updateUserById(user._id, plan);
@@ -91,11 +91,35 @@ async function ensureAdminSeed() {
   });
 }
 
+async function ensureSharekhanSeed() {
+  const email = (process.env.SHAREKHAN_SEED_EMAIL || "").trim().toLowerCase();
+  const password = process.env.SHAREKHAN_SEED_PASSWORD;
+  if (!email || !password) return null;
+
+  const existing = await findUserByEmail(email);
+  const passwordHash = await bcrypt.hash(password, 10);
+  if (existing) {
+    if (existing.role !== "sharekhan" || !existing.emailVerified || process.env.SHAREKHAN_SEED_FORCE === "true") {
+      return updateUserById(existing._id, {
+        name: "Sharekhan Operator", passwordHash, role: "sharekhan",
+        planName: null, planExpiresAt: null, emailVerified: true,
+        otpHash: null, otpExpiresAt: null, otpAttempts: 0,
+      });
+    }
+    return existing;
+  }
+  return createUser({
+    name: "Sharekhan Operator", email, passwordHash, role: "sharekhan",
+    planName: null, planExpiresAt: null, emailVerified: true,
+  });
+}
+
 module.exports = {
   findUserByEmail,
   findUserById,
   createUser,
   ensureAdminSeed,
+  ensureSharekhanSeed,
   buildPlan,
   buildPlanWithDuration,
   ensureUserPlan,
