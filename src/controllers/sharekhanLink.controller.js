@@ -172,9 +172,16 @@ async function createIntent(req, res) {
   const quantity = Number(source.quantity);
   const price = Number(source.price);
   const rawBracket = source.bracket && typeof source.bracket === "object" ? source.bracket : {};
-  // Sharekhan BigTrade+ = entry + mandatory SL + optional book-profit (same shape as bracket legs).
-  if (orderType === "BRACKET") productType = "BIGTRADEPLUS";
-  const wantBracket = orderType === "BRACKET" || Boolean(rawBracket.enabled);
+  // Sharekhan BigTrade+ = product/action BigTrade+ + entry + mandatory SL + optional book-profit.
+  // One-tap cannot carry product/SL; openMode brackettsl is the proven web path.
+  const wantBracket =
+    orderType === "BRACKET" ||
+    productType === "BIGTRADEPLUS" ||
+    Boolean(rawBracket.enabled);
+  if (wantBracket) {
+    productType = "BIGTRADEPLUS";
+    orderType = "BRACKET";
+  }
   const bracket = {
     enabled: wantBracket,
     mode: "BIGTRADEPLUS",
@@ -182,6 +189,7 @@ async function createIntent(req, res) {
     stopLossPrice: Number(rawBracket.stopLossPrice || source.stopLoss || source.card?.stopLoss || 0),
     trailingStop: Number(rawBracket.trailingStop || 0),
   };
+  const openMode = wantBracket ? "brackettsl" : "normal";
   if (!tradingSymbol || !/^[A-Z0-9._-]+$/.test(tradingSymbol)) throw createHttpError(400, "Valid trading symbol is required");
   if (!["BUY", "SELL"].includes(side)) throw createHttpError(400, "Choose Buy or Sell");
   if (!Number.isSafeInteger(quantity) || quantity < 1) throw createHttpError(400, "Quantity must be a positive whole number");
@@ -265,6 +273,7 @@ async function createIntent(req, res) {
     timeFrame: String(source.card?.timeFrame || source.timeFrame || (productType === "BIGTRADEPLUS" ? "INTRADAY" : "")).trim().slice(0, 40),
     headline: String(source.card?.headline || source.headline || (bracket.enabled ? "BigTrade+ Bracket" : "")).trim().slice(0, 60),
   };
+  const bracketWebUrl = webTradeUrl({ exchange, tradingSymbol, scripCode, bracket, orderType });
   const details = {
     stock,
     tradingSymbol,
@@ -279,7 +288,8 @@ async function createIntent(req, res) {
     validity,
     triggerPrice,
     bracket,
-    bracketWebUrl: webTradeUrl({ exchange, tradingSymbol, scripCode, bracket, orderType }),
+    openMode,
+    bracketWebUrl,
     card,
     notes: String(source.notes || "").trim().slice(0, 500),
   };
@@ -298,9 +308,33 @@ async function getIntent(req, res) {
   const apps = mobileAppUrls(payload);
   const ua = req.headers?.["user-agent"] || "";
   const appUrl = ourOnetapUrl(payload) || pickMobileAppUrl(payload, ua) || "";
+  const d = record.details || {};
+  const isBtp =
+    String(d.openMode || "").toLowerCase() === "brackettsl" ||
+    String(d.orderType || "").toUpperCase() === "BRACKET" ||
+    String(d.productType || "").toUpperCase() === "BIGTRADEPLUS" ||
+    Boolean(d.bracket?.enabled);
+  const details = {
+    ...d,
+    ...(isBtp
+      ? {
+          productType: "BIGTRADEPLUS",
+          openMode: "brackettsl",
+          bracketWebUrl:
+            d.bracketWebUrl ||
+            webTradeUrl({
+              exchange: d.exchange,
+              tradingSymbol: d.tradingSymbol,
+              scripCode: d.scripCode,
+              bracket: { enabled: true },
+              orderType: "BRACKET",
+            }),
+        }
+      : {}),
+  };
   sendJson(res, 200, {
     ok: true,
-    details: record.details,
+    details,
     payload,
     appUrl,
     androidAppUrl: apps.android,
