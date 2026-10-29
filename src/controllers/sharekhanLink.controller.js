@@ -259,11 +259,13 @@ async function createIntent(req, res) {
     source.card?.target1 || source.target1 || source.card?.target || source.target || ""
   ).trim().slice(0, 40);
   const target2 = String(source.card?.target2 || source.target2 || "").trim().slice(0, 40);
+  const target3 = String(source.card?.target3 || source.target3 || "").trim().slice(0, 40);
   const card = {
     buyRange: String(source.card?.buyRange || source.buyRange || price || "").trim().slice(0, 40),
     target1,
     target2,
-    target: [target1, target2].filter(Boolean).join(" / ").slice(0, 40),
+    target3,
+    target: [target1, target2, target3].filter(Boolean).join(" / ").slice(0, 80),
     stopLoss: String(source.card?.stopLoss || source.stopLoss || "").trim().slice(0, 40),
     timeFrame: String(source.card?.timeFrame || source.timeFrame || (productType === "BIGTRADE" ? "INTRADAY" : "")).trim().slice(0, 40),
     headline: String(source.card?.headline || source.headline || "").trim().slice(0, 60),
