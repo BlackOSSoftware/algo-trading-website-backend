@@ -32,7 +32,10 @@ function webTradeUrl(details) {
   const symbol = encodeURIComponent(String(details?.tradingSymbol || "").trim().toUpperCase());
   const scripCode = String(details?.scripCode || "").trim();
   if (!symbol || !scripCode || !["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) return SHAREKHAN_TRADING_HOME;
-  return `https://newtrade.sharekhan.com/skweb/trading/tradenow/normal/${exchange}/${symbol}/${scripCode}`;
+  const mode = details?.bracket?.enabled || String(details?.orderType || "").toUpperCase() === "BRACKET"
+    ? "brackettsl"
+    : "normal";
+  return `https://newtrade.sharekhan.com/skweb/trading/tradenow/${mode}/${exchange}/${symbol}/${scripCode}`;
 }
 
 // Pehle downloads.sharekhan.com/onetap.html app kholta tha; us host ka SSL ab expire hai.
@@ -94,7 +97,8 @@ async function skOnetapRedirect(req, res) {
 // Sharekhan one-tap format (verified against official GOLDETF sample + field tests):
 // 131$<exchange>$<scrip>$<qty>$<price>$<side>
 // NSE=11, BSE=12, BUY=1, SELL=2, empty price = market.
-// Old side$price$qty order made qty show as 1 and side/exchange look flipped in the app.
+// Bracket/BigTrade+ SL+target are NOT in the public one-tap schema — entry fields only.
+// Extra trailing fields have broken parsing before, so we keep the proven 6-field payload.
 function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
   const exchangeNorm = String(exchange || "").trim().toUpperCase();
   const sideNorm = String(side || "").trim().toUpperCase();
@@ -161,18 +165,23 @@ async function createIntent(req, res) {
   const side = String(source.side || "").trim().toUpperCase();
   const exchange = String(source.exchange || "").trim().toUpperCase();
   const segment = String(source.segment || "EQ").trim().toUpperCase();
-  const orderType = String(source.orderType || "NORMAL").trim().toUpperCase();
-  const productType = String(source.productType || "INVESTMENT").trim().toUpperCase();
+  let orderType = String(source.orderType || "NORMAL").trim().toUpperCase();
+  let productType = String(source.productType || "INVESTMENT").trim().toUpperCase();
   const validity = String(source.validity || "GFD").trim().toUpperCase();
   const triggerPrice = Number(source.triggerPrice || 0);
-  const bracket = source.bracket && typeof source.bracket === "object" ? {
-    enabled: Boolean(source.bracket.enabled),
-    targetPrice: Number(source.bracket.targetPrice || 0),
-    stopLossPrice: Number(source.bracket.stopLossPrice || 0),
-    trailingStop: Number(source.bracket.trailingStop || 0),
-  } : { enabled: false, targetPrice: 0, stopLossPrice: 0, trailingStop: 0 };
   const quantity = Number(source.quantity);
   const price = Number(source.price);
+  const rawBracket = source.bracket && typeof source.bracket === "object" ? source.bracket : {};
+  // Sharekhan BigTrade+ = entry + mandatory SL + optional book-profit (same shape as bracket legs).
+  if (orderType === "BRACKET") productType = "BIGTRADEPLUS";
+  const wantBracket = orderType === "BRACKET" || Boolean(rawBracket.enabled);
+  const bracket = {
+    enabled: wantBracket,
+    mode: "BIGTRADEPLUS",
+    targetPrice: Number(rawBracket.targetPrice || source.target || source.card?.target1 || 0),
+    stopLossPrice: Number(rawBracket.stopLossPrice || source.stopLoss || source.card?.stopLoss || 0),
+    trailingStop: Number(rawBracket.trailingStop || 0),
+  };
   if (!tradingSymbol || !/^[A-Z0-9._-]+$/.test(tradingSymbol)) throw createHttpError(400, "Valid trading symbol is required");
   if (!["BUY", "SELL"].includes(side)) throw createHttpError(400, "Choose Buy or Sell");
   if (!Number.isSafeInteger(quantity) || quantity < 1) throw createHttpError(400, "Quantity must be a positive whole number");
@@ -180,13 +189,29 @@ async function createIntent(req, res) {
   if (!["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) throw createHttpError(400, "Choose a supported exchange");
   if (!["EQ", "FUT", "OPT"].includes(segment)) throw createHttpError(400, "Choose Equity, Futures, or Options");
   if (segment !== "EQ" && !["NFO", "BFO", "MCX", "CDS"].includes(exchange)) throw createHttpError(400, "Choose a derivatives exchange for Futures or Options");
-  if (!["NORMAL", "LIMIT", "STOPLOSS", "STOPLOSS_MARKET"].includes(orderType)) throw createHttpError(400, "Choose a supported Sharekhan order type");
+  if (!["NORMAL", "LIMIT", "STOPLOSS", "STOPLOSS_MARKET", "BRACKET"].includes(orderType)) throw createHttpError(400, "Choose a supported Sharekhan order type");
   if (!["INVESTMENT", "BIGTRADE", "BIGTRADEPLUS"].includes(productType)) throw createHttpError(400, "Choose a supported Sharekhan product type");
   if (!["GFD", "IOC"].includes(validity)) throw createHttpError(400, "Choose Day or IOC validity");
-  if (orderType !== "NORMAL" && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
+  if (!["NORMAL", "BRACKET"].includes(orderType) && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
   if (orderType.startsWith("STOPLOSS") && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) throw createHttpError(400, "A positive trigger price is required for stop-loss orders");
-  if (bracket.enabled && (!["NSE", "BSE"].includes(exchange) || segment !== "EQ")) throw createHttpError(400, "Bracket order links are supported here for equity contracts only");
-  if (bracket.enabled && (!(bracket.targetPrice > 0) || !(bracket.stopLossPrice > 0) || bracket.targetPrice === bracket.stopLossPrice)) throw createHttpError(400, "Bracket order needs different positive target and stop-loss prices");
+  if (bracket.enabled && (!["NSE", "BSE"].includes(exchange) || segment !== "EQ")) {
+    throw createHttpError(400, "Bracket / BigTrade+ links are supported here for equity NSE/BSE only");
+  }
+  if (bracket.enabled && !(bracket.stopLossPrice > 0)) {
+    throw createHttpError(400, "BigTrade+ / Bracket needs a positive stop-loss price (mandatory in Sharekhan)");
+  }
+  if (bracket.enabled && bracket.targetPrice > 0 && bracket.targetPrice === bracket.stopLossPrice) {
+    throw createHttpError(400, "Book-profit target and stop-loss must be different prices");
+  }
+  if (bracket.enabled && price > 0) {
+    if (side === "BUY") {
+      if (!(bracket.stopLossPrice < price)) throw createHttpError(400, "For BUY brackets, stop-loss should be below entry price");
+      if (bracket.targetPrice > 0 && !(bracket.targetPrice > price)) throw createHttpError(400, "For BUY brackets, book-profit target should be above entry price");
+    } else {
+      if (!(bracket.stopLossPrice > price)) throw createHttpError(400, "For SELL brackets, stop-loss should be above entry price");
+      if (bracket.targetPrice > 0 && !(bracket.targetPrice < price)) throw createHttpError(400, "For SELL brackets, book-profit target should be below entry price");
+    }
+  }
   if (segment === "EQ" && !["NSE", "BSE"].includes(exchange)) {
     throw createHttpError(400, "Equity orders support NSE and BSE only. Switch segment to Futures/Options for MCX or CDS.");
   }
@@ -225,22 +250,39 @@ async function createIntent(req, res) {
   const payload = ["NSE", "BSE"].includes(exchange) && segment === "EQ"
     ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
     : "";
-  const target1 = String(source.card?.target1 || source.target1 || source.card?.target || source.target || "").trim().slice(0, 40);
+  const target1 = String(
+    source.card?.target1 || source.target1 || (bracket.targetPrice > 0 ? bracket.targetPrice : "") || source.card?.target || source.target || ""
+  ).trim().slice(0, 40);
   const target2 = String(source.card?.target2 || source.target2 || "").trim().slice(0, 40);
   const card = {
     buyRange: String(source.card?.buyRange || source.buyRange || price || "").trim().slice(0, 40),
     target1,
     target2,
     target: [target1, target2].filter(Boolean).join(" / ").slice(0, 40),
-    stopLoss: String(source.card?.stopLoss || source.stopLoss || "").trim().slice(0, 40),
-    timeFrame: String(source.card?.timeFrame || source.timeFrame || "").trim().slice(0, 40),
-    headline: String(source.card?.headline || source.headline || "").trim().slice(0, 60),
+    stopLoss: String(
+      source.card?.stopLoss || source.stopLoss || (bracket.stopLossPrice > 0 ? bracket.stopLossPrice : "") || ""
+    ).trim().slice(0, 40),
+    timeFrame: String(source.card?.timeFrame || source.timeFrame || (productType === "BIGTRADEPLUS" ? "INTRADAY" : "")).trim().slice(0, 40),
+    headline: String(source.card?.headline || source.headline || (bracket.enabled ? "BigTrade+ Bracket" : "")).trim().slice(0, 60),
   };
-  const details = { stock, tradingSymbol, side, quantity, price, exchange, segment, scripCode,
-    orderType, productType, validity, triggerPrice,
+  const details = {
+    stock,
+    tradingSymbol,
+    side,
+    quantity,
+    price,
+    exchange,
+    segment,
+    scripCode,
+    orderType,
+    productType,
+    validity,
+    triggerPrice,
     bracket,
+    bracketWebUrl: webTradeUrl({ exchange, tradingSymbol, scripCode, bracket, orderType }),
     card,
-    notes: String(source.notes || "").trim().slice(0, 500) };
+    notes: String(source.notes || "").trim().slice(0, 500),
+  };
   const record = { code: crypto.randomBytes(12).toString("base64url"), kind: "order-intent", payload, details,
     active: true, clicks: 0, createdAt: new Date(), createdBy: req.user.sub };
   await collection().insertOne(record);
