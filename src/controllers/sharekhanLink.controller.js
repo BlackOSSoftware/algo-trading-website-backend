@@ -217,8 +217,13 @@ async function createIntent(req, res) {
   if (!["GFD", "IOC"].includes(validity)) throw createHttpError(400, "Choose Day or IOC validity");
   if (!["NORMAL", "BRACKET"].includes(orderType) && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
   if (orderType.startsWith("STOPLOSS") && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) throw createHttpError(400, "A positive trigger price is required for stop-loss orders");
-  if (bracket.enabled && (!["NSE", "BSE"].includes(exchange) || segment !== "EQ")) {
-    throw createHttpError(400, "Bracket / BigTrade+ links are supported here for equity NSE/BSE only");
+  // Sharekhan BigTrade+ is allowed on equity cash and F&O/commodity (per BTP TnC).
+  if (bracket.enabled) {
+    const equityOk = segment === "EQ" && ["NSE", "BSE"].includes(exchange);
+    const derivOk = segment !== "EQ" && ["NFO", "BFO", "MCX", "CDS"].includes(exchange);
+    if (!equityOk && !derivOk) {
+      throw createHttpError(400, "BigTrade+ / Bracket needs equity NSE/BSE or derivatives NFO/BFO/MCX/CDS");
+    }
   }
   if (bracket.enabled && !(bracket.stopLossPrice > 0)) {
     throw createHttpError(400, "BigTrade+ / Bracket needs a positive stop-loss price (mandatory in Sharekhan)");
