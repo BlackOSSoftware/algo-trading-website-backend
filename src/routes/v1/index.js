@@ -113,6 +113,7 @@ function registerV1Routes(router) {
   router.get("/api/v1/sharekhan/instruments/expiries", requireSharekhan(listSharekhanExpiries));
   router.post("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.create));
   router.post("/api/v1/sharekhan/links/:code/deactivate", requireSharekhan(sharekhanLinks.deactivate));
+  router.post("/api/v1/sharekhan/links/:code/delete", requireSharekhan(sharekhanLinks.remove));
   router.get("/api/v1/sharekhan/feed/status", requireSharekhan(adminSharekhanFeed.status));
   router.post("/api/v1/sharekhan/feed/login", requireSharekhan(adminSharekhanFeed.login));
   router.post("/api/v1/sharekhan/feed/complete", requireSharekhan(adminSharekhanFeed.complete));

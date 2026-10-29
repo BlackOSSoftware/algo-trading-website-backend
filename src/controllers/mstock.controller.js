@@ -540,8 +540,8 @@ async function searchInstruments(req, res) {
 async function searchSharekhanInstruments(req, res) {
   const params = req.parsedUrl?.searchParams;
   const q = params ? params.get("q") || "" : "";
-  const exchange = params ? params.get("exchange") || "" : "";
-  const segment = params ? params.get("segment") || "EQ" : "EQ";
+  const exchange = String(params ? params.get("exchange") || "" : "").trim().toUpperCase();
+  const segment = String(params ? params.get("segment") || "EQ" : "EQ").trim().toUpperCase();
   const expiry = params ? params.get("expiry") || "" : "";
   const limitRaw = params ? params.get("limit") : null;
   const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
@@ -549,10 +549,24 @@ async function searchSharekhanInstruments(req, res) {
     sendJson(res, 200, { ok: true, instruments: [] });
     return;
   }
+  if (segment === "EQ" && exchange && !["NSE", "BSE"].includes(exchange)) {
+    sendJson(res, 200, { ok: true, instruments: [], hint: "Equity search is limited to NSE and BSE." });
+    return;
+  }
+  if (segment !== "EQ" && ["NSE", "BSE"].includes(exchange)) {
+    sendJson(res, 200, { ok: true, instruments: [], hint: "Futures/Options search needs NFO, BFO, MCX, or CDS." });
+    return;
+  }
   if (exchange === "MCX") {
     try { await ensureSharekhanMcxInstruments(); } catch { /* serve the local master if refresh fails */ }
   }
-  const instruments = await searchMStockInstruments(q, { limit, exchange, segment, expiry, instrumentType: segment === "EQ" ? "EQ" : "" });
+  const instruments = await searchMStockInstruments(q, {
+    limit,
+    exchange,
+    segment,
+    expiry,
+    instrumentType: segment === "EQ" ? "EQ" : segment === "FUT" ? "FUT" : segment === "OPT" ? "OPT" : "",
+  });
   sendJson(res, 200, { ok: true, instruments });
 }
 

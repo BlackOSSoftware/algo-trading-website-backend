@@ -169,12 +169,24 @@ async function searchInstruments(query, { limit = 20, exchange = "", instrumentT
 
   const segmentNorm = normalizeString(segment).toUpperCase();
   const typeNorm = normalizeString(instrumentType).toUpperCase();
-  if (segmentNorm === "OPT" || typeNorm === "OPT") {
-    filter.$and.push({ instrumentType: { $regex: "OPT", $options: "i" } });
-  } else if (segmentNorm === "FUT" || (exchangeNorm === "MCX" && !typeNorm)) {
-    filter.$and.push({ instrumentType: { $not: /OPT/i } });
-  } else if (typeNorm === "EQ") {
+  // Equity lives on cash exchanges only. Never return NSE/BSE cash names for MCX/CDS.
+  if (segmentNorm === "EQ" || typeNorm === "EQ") {
+    if (exchangeNorm && !["NSE", "BSE"].includes(exchangeNorm)) {
+      return [];
+    }
     filter.$and.push({ instrumentType: { $in: ["EQ", "EQUITY"] } });
+  } else if (segmentNorm === "OPT" || typeNorm === "OPT") {
+    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) {
+      return [];
+    }
+    filter.$and.push({ instrumentType: { $regex: /OPT|OPTSTK|OPTIDX|OPTCUR|OI|OS/i } });
+  } else if (segmentNorm === "FUT" || typeNorm === "FUT") {
+    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) {
+      return [];
+    }
+    filter.$and.push({ instrumentType: { $regex: /FUT|FUTSTK|FUTIDX|FUTCOM|FUTCUR|FS|FI/i } });
+  } else if (exchangeNorm === "MCX" || exchangeNorm === "CDS") {
+    filter.$and.push({ instrumentType: { $not: /^(EQ|EQUITY)$/i } });
   } else if (typeNorm) {
     filter.$and.push({ instrumentType: typeNorm });
   }

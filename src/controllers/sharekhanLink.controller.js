@@ -41,9 +41,11 @@ function mobileAppUrls(payload) {
   const deep = String(payload || "").trim();
   if (!deep) return { android: "", ios: "", scheme: "" };
   // Exact Sharekhan onetap.js format: prefix encoded, payload appended raw (with $).
+  // Prefix is percent-encoded; payload `$` stays raw (Sharekhan one-tap parses `$` fields).
+  const encodedPrefix = "splashscheme%3A%2F%2FDEEPLINK%3D";
   return {
-    android: `https://app.adjust.net.in/tp42jlw?label=ADJUST_DEEP_LINK&deeplink=splashscheme%3A%2F%2FDEEPLINK%3D${deep}`,
-    ios: `https://v6yk.adj.st/102%2411%2422?adj_t=1t1b59tm&adj_deep_link=splashscheme%3A%2F%2F${deep}`,
+    android: `https://app.adjust.net.in/tp42jlw?label=ADJUST_DEEP_LINK&deeplink=${encodedPrefix}${deep}`,
+    ios: `https://v6yk.adj.st/?adj_t=1t1b59tm&adj_deep_link=${encodedPrefix}${deep}`,
     scheme: `splashscheme://DEEPLINK=${deep}`,
   };
 }
@@ -89,13 +91,20 @@ async function skOnetapRedirect(req, res) {
   res.end();
 }
 
-// Matches Sharekhan's own link format: 131$<exchange>$<scrip>$<side>$<price>$<qty>, NSE = 11, empty price = market.
+// Sharekhan one-tap format (verified against official GOLDETF sample + field tests):
+// 131$<exchange>$<scrip>$<qty>$<price>$<side>
+// NSE=11, BSE=12, BUY=1, SELL=2, empty price = market.
+// Old side$price$qty order made qty show as 1 and side/exchange look flipped in the app.
 function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
-  const exchangeCode = exchange === "BSE" ? "12" : "11";
-  const sideCode = side === "SELL" ? "2" : "1";
+  const exchangeNorm = String(exchange || "").trim().toUpperCase();
+  const sideNorm = String(side || "").trim().toUpperCase();
+  const exchangeCode = exchangeNorm === "BSE" ? "12" : "11";
+  const sideCode = sideNorm === "SELL" ? "2" : "1";
+  const qtyNum = Number(quantity);
+  const qtyCode = Number.isFinite(qtyNum) && qtyNum > 0 ? String(Math.trunc(qtyNum)) : "1";
   const numericPrice = Number(price);
   const priceCode = Number.isFinite(numericPrice) && numericPrice > 0 ? String(numericPrice) : "";
-  return ["131", exchangeCode, String(scripCode), sideCode, priceCode, String(quantity)].join("$");
+  return ["131", exchangeCode, String(scripCode).trim(), qtyCode, priceCode, sideCode].join("$");
 }
 
 function intentPayload(record) {
@@ -178,6 +187,12 @@ async function createIntent(req, res) {
   if (orderType.startsWith("STOPLOSS") && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) throw createHttpError(400, "A positive trigger price is required for stop-loss orders");
   if (bracket.enabled && (!["NSE", "BSE"].includes(exchange) || segment !== "EQ")) throw createHttpError(400, "Bracket order links are supported here for equity contracts only");
   if (bracket.enabled && (!(bracket.targetPrice > 0) || !(bracket.stopLossPrice > 0) || bracket.targetPrice === bracket.stopLossPrice)) throw createHttpError(400, "Bracket order needs different positive target and stop-loss prices");
+  if (segment === "EQ" && !["NSE", "BSE"].includes(exchange)) {
+    throw createHttpError(400, "Equity orders support NSE and BSE only. Switch segment to Futures/Options for MCX or CDS.");
+  }
+  if (segment !== "EQ" && ["NSE", "BSE"].includes(exchange)) {
+    throw createHttpError(400, "Futures/Options need NFO, BFO, MCX, or CDS. Equity cash uses NSE/BSE.");
+  }
   let scripCode = String(source.scripCode || "").trim();
   if (!/^[1-9]\d{0,12}$/.test(scripCode)) {
     const instrument = await resolveInstrumentForOrder({ symbol: tradingSymbol, exchange, segment, symbolToken: source.scripCode });
@@ -185,28 +200,41 @@ async function createIntent(req, res) {
   }
   if (/^[1-9]\d{0,12}$/.test(scripCode)) {
     const instrument = await resolveInstrumentForOrder({ exchange, segment, symbolToken: scripCode });
-    if (!instrument || String(instrument.symbol || "").toUpperCase() !== tradingSymbol) {
-      throw createHttpError(400, "Selected instrument does not match the symbol, exchange, and segment");
+    if (!instrument) {
+      throw createHttpError(400, "Scrip code not found for this exchange. Search and select the instrument again.");
+    }
+    const normalizeSym = (value) => String(value || "").trim().toUpperCase().replace(/-(EQ|BE|BL|ZZ)$/i, "");
+    const selected = normalizeSym(instrument.symbol);
+    const expected = normalizeSym(tradingSymbol);
+    const name = normalizeSym(instrument.name);
+    const compatible =
+      selected === expected ||
+      name === expected ||
+      selected.startsWith(expected) ||
+      expected.startsWith(selected);
+    if (!compatible) {
+      throw createHttpError(
+        400,
+        `Instrument mismatch: scrip ${scripCode} is ${instrument.symbol} on ${instrument.exchange}, not ${tradingSymbol} on ${exchange}.`
+      );
     }
   }
   if (!/^[1-9]\d{0,12}$/.test(scripCode)) {
-    throw createHttpError(400, "Sharekhan scrip code not found. Enter the scrip code, or sync the script master.");
+    throw createHttpError(400, "Sharekhan scrip code not found. Search and select an instrument, or sync the script master.");
   }
   const payload = ["NSE", "BSE"].includes(exchange) && segment === "EQ"
     ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
     : "";
-  const card = source.card && typeof source.card === "object" ? {
-    buyRange: String(source.card.buyRange || source.buyRange || price || "").trim().slice(0, 40),
-    target: String(source.card.target || source.target || "").trim().slice(0, 40),
-    stopLoss: String(source.card.stopLoss || source.stopLoss || "").trim().slice(0, 40),
-    timeFrame: String(source.card.timeFrame || source.timeFrame || "").trim().slice(0, 40),
-    headline: String(source.card.headline || source.headline || "").trim().slice(0, 60),
-  } : {
-    buyRange: String(source.buyRange || price || "").trim().slice(0, 40),
-    target: String(source.target || "").trim().slice(0, 40),
-    stopLoss: String(source.stopLoss || "").trim().slice(0, 40),
-    timeFrame: String(source.timeFrame || "").trim().slice(0, 40),
-    headline: String(source.headline || "").trim().slice(0, 60),
+  const target1 = String(source.card?.target1 || source.target1 || source.card?.target || source.target || "").trim().slice(0, 40);
+  const target2 = String(source.card?.target2 || source.target2 || "").trim().slice(0, 40);
+  const card = {
+    buyRange: String(source.card?.buyRange || source.buyRange || price || "").trim().slice(0, 40),
+    target1,
+    target2,
+    target: [target1, target2].filter(Boolean).join(" / ").slice(0, 40),
+    stopLoss: String(source.card?.stopLoss || source.stopLoss || "").trim().slice(0, 40),
+    timeFrame: String(source.card?.timeFrame || source.timeFrame || "").trim().slice(0, 40),
+    headline: String(source.card?.headline || source.headline || "").trim().slice(0, 60),
   };
   const details = { stock, tradingSymbol, side, quantity, price, exchange, segment, scripCode,
     orderType, productType, validity, triggerPrice,
@@ -262,6 +290,14 @@ async function deactivate(req, res) {
   sendJson(res, 200, { ok: true });
 }
 
+async function remove(req, res) {
+  const code = String(req.params.code || "").trim();
+  if (!code) throw createHttpError(400, "Link code is required");
+  const result = await collection().deleteOne({ code });
+  if (!result.deletedCount) throw createHttpError(404, "Link not found");
+  sendJson(res, 200, { ok: true, deleted: true, code });
+}
+
 function publicOrderUrl(record) {
   if (record?.kind === "order-intent") {
     return `https://www.emotionlesstraders.com/order/${record.code}`;
@@ -314,6 +350,7 @@ module.exports = {
   getIntent,
   list,
   deactivate,
+  remove,
   getLinkQr,
   redirect,
   skOnetapRedirect,
