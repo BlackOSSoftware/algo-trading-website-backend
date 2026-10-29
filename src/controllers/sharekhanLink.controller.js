@@ -96,13 +96,24 @@ async function skOnetapRedirect(req, res) {
 
 // Sharekhan one-tap format (verified against official GOLDETF sample + field tests):
 // 131$<exchange>$<scrip>$<qty>$<price>$<side>
-// NSE=11, BSE=12, BUY=1, SELL=2, empty price = market.
+// Equity: NSE=11, BSE=12. F&O ids from Sharekhan app mobile_config (ez_options):
+// NFO=12, BFO=22, MCX=32. CDS best-effort=13.
+// BUY=1, SELL=2, empty price = market.
 // Bracket/BigTrade+ SL+target are NOT in the public one-tap schema — entry fields only.
 // Extra trailing fields have broken parsing before, so we keep the proven 6-field payload.
-function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
+function exchangeCodeForDeepLink(exchange) {
   const exchangeNorm = String(exchange || "").trim().toUpperCase();
+  if (exchangeNorm === "BSE") return "12";
+  if (exchangeNorm === "NFO") return "12";
+  if (exchangeNorm === "BFO") return "22";
+  if (exchangeNorm === "MCX") return "32";
+  if (exchangeNorm === "CDS") return "13";
+  return "11"; // NSE cash
+}
+
+function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
   const sideNorm = String(side || "").trim().toUpperCase();
-  const exchangeCode = exchangeNorm === "BSE" ? "12" : "11";
+  const exchangeCode = exchangeCodeForDeepLink(exchange);
   const sideCode = sideNorm === "SELL" ? "2" : "1";
   const qtyNum = Number(quantity);
   const qtyCode = Number.isFinite(qtyNum) && qtyNum > 0 ? String(Math.trunc(qtyNum)) : "1";
@@ -116,8 +127,12 @@ function intentPayload(record) {
   if (record?.kind !== "order-intent" || !/^[1-9]\d{0,12}$/.test(String(details.scripCode || ""))) {
     return record?.payload || "";
   }
+  const exchange = String(details.exchange || "").trim().toUpperCase();
+  if (!["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) {
+    return record?.payload || "";
+  }
   return buildOrderDeepLink({
-    exchange: details.exchange,
+    exchange,
     scripCode: details.scripCode,
     side: details.side,
     price: details.price,
@@ -255,7 +270,8 @@ async function createIntent(req, res) {
   if (!/^[1-9]\d{0,12}$/.test(scripCode)) {
     throw createHttpError(400, "Sharekhan scrip code not found. Search and select an instrument, or sync the script master.");
   }
-  const payload = ["NSE", "BSE"].includes(exchange) && segment === "EQ"
+  // Equity + F&O/commodity one-tap use the same 6-field shape; exchange id selects the segment master.
+  const payload = ["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)
     ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
     : "";
   const target1 = String(
