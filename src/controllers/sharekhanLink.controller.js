@@ -144,6 +144,7 @@ function publicRecord(record, req) {
   const base = (process.env.PUBLIC_API_URL || "https://api.emotionlesstraders.com").replace(/\/$/, "");
   const payload = intentPayload(record);
   const apps = mobileAppUrls(payload);
+  const preserved = Boolean(record.preserved);
   if (record.kind === "order-intent") {
     return {
       code: record.code,
@@ -151,9 +152,11 @@ function publicRecord(record, req) {
       destination: apps.android || apps.ios || "",
       androidAppUrl: apps.android,
       iosAppUrl: apps.ios,
+      payload,
       details: record.details,
       kind: record.kind,
       active: record.active,
+      preserved,
       createdAt: record.createdAt,
       clicks: record.clicks || 0,
     };
@@ -164,9 +167,11 @@ function publicRecord(record, req) {
     destination: apps.android || onetapUrl(payload, record.details),
     androidAppUrl: apps.android,
     iosAppUrl: apps.ios,
+    payload,
     details: record.details,
     kind: record.kind || "sharekhan-deeplink",
     active: record.active,
+    preserved,
     createdAt: record.createdAt,
     clicks: record.clicks || 0,
   };
@@ -377,11 +382,18 @@ async function create(req, res) {
 }
 
 async function list(req, res) {
-  const records = await collection().find({}, { projection: { createdBy: 0 } }).sort({ createdAt: -1 }).limit(100).toArray();
+  const records = await collection()
+    .find({}, { projection: { createdBy: 0 } })
+    .sort({ preserved: -1, createdAt: -1 })
+    .limit(120)
+    .toArray();
   sendJson(res, 200, { ok: true, links: records.map((record) => publicRecord(record, req)) });
 }
 
 async function deactivate(req, res) {
+  const existing = await collection().findOne({ code: req.params.code }, { projection: { preserved: 1 } });
+  if (!existing) throw createHttpError(404, "Link not found");
+  if (existing.preserved) throw createHttpError(403, "Preserved demo links cannot be deactivated");
   const result = await collection().updateOne({ code: req.params.code }, { $set: { active: false } });
   if (!result.matchedCount) throw createHttpError(404, "Link not found");
   sendJson(res, 200, { ok: true });
@@ -390,6 +402,9 @@ async function deactivate(req, res) {
 async function remove(req, res) {
   const code = String(req.params.code || "").trim();
   if (!code) throw createHttpError(400, "Link code is required");
+  const existing = await collection().findOne({ code }, { projection: { preserved: 1 } });
+  if (!existing) throw createHttpError(404, "Link not found");
+  if (existing.preserved) throw createHttpError(403, "Preserved demo links cannot be deleted");
   const result = await collection().deleteOne({ code });
   if (!result.deletedCount) throw createHttpError(404, "Link not found");
   sendJson(res, 200, { ok: true, deleted: true, code });
