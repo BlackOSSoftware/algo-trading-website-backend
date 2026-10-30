@@ -9,6 +9,17 @@ const { createHttpError } = require("../utils/httpError");
 const collection = () => getDb().collection("sharekhan_links");
 const SHAREKHAN_TRADING_HOME = "https://newtrade.sharekhan.com/";
 
+function isValidDeepLinkPayload(payload) {
+  const value = String(payload || "").trim();
+  if (!value || value.length > 500) return false;
+  // Single-leg: 131$exchange$scrip$qty$price$side
+  if (/^\d+(?:\$[\d.]*){0,30}$/.test(value)) return true;
+  // Multi-leg spread (Sharekhan research / basket one-tap):
+  // 181$NF-127904-BUY-0-150_NF-103787-SELL-0-150$2826052
+  if (/^181\$[A-Za-z0-9._$-]+$/.test(value)) return true;
+  return false;
+}
+
 function parsePayload(input) {
   const value = String(input || "").trim();
   let payload = value;
@@ -21,8 +32,8 @@ function parsePayload(input) {
     payload = url.searchParams.get("deepLinking") || "";
   }
   payload = payload.replace(/%24/gi, "$");
-  if (!/^\d+(?:\$[\d.]*){0,30}$/.test(payload) || payload.length > 300) {
-    throw createHttpError(400, "Enter a verified numeric $-separated deepLinking payload");
+  if (!isValidDeepLinkPayload(payload)) {
+    throw createHttpError(400, "Enter a verified Sharekhan deepLinking payload");
   }
   return payload;
 }
@@ -81,7 +92,7 @@ function onetapUrl(payload, _details, userAgent) {
 async function skOnetapRedirect(req, res) {
   const raw = String(req.parsedUrl?.searchParams?.get("deepLinking") || "").trim();
   const payload = raw.replace(/%24/gi, "$");
-  if (!/^\d+(?:\$[\d.]*){0,30}$/.test(payload) || payload.length > 300) {
+  if (!isValidDeepLinkPayload(payload)) {
     throw createHttpError(400, "Invalid Sharekhan deepLinking payload");
   }
   const location = pickMobileAppUrl(payload, req.headers?.["user-agent"] || "");
@@ -122,9 +133,47 @@ function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
   return ["131", exchangeCode, String(scripCode).trim(), qtyCode, priceCode, sideCode].join("$");
 }
 
+// Multi-leg one-tap (verified from Sharekhan gi9 / onetap deepLinking):
+// 181$NF-<scrip>-BUY-<price>-<qty>_NF-<scrip>-SELL-<price>-<qty>$<optionalId>
+function exchangePrefixForMultiLeg(exchange) {
+  const exchangeNorm = String(exchange || "").trim().toUpperCase();
+  if (exchangeNorm === "BFO" || exchangeNorm === "BSE") return "BF";
+  if (exchangeNorm === "MCX") return "MX";
+  if (exchangeNorm === "CDS") return "CD";
+  return "NF"; // NFO / NSE F&O
+}
+
+function buildMultiLegToken({ exchange, scripCode, side, price, quantity }) {
+  const prefix = exchangePrefixForMultiLeg(exchange);
+  const sideNorm = String(side || "").trim().toUpperCase() === "SELL" ? "SELL" : "BUY";
+  const qtyNum = Number(quantity);
+  const qtyCode = Number.isFinite(qtyNum) && qtyNum > 0 ? String(Math.trunc(qtyNum)) : "1";
+  const numericPrice = Number(price);
+  const priceCode = Number.isFinite(numericPrice) && numericPrice > 0 ? String(numericPrice) : "0";
+  return `${prefix}-${String(scripCode).trim()}-${sideNorm}-${priceCode}-${qtyCode}`;
+}
+
+function buildMultiLegDeepLink(legs, trailingId = "") {
+  const tokens = (Array.isArray(legs) ? legs : [])
+    .map((leg) => buildMultiLegToken(leg))
+    .filter(Boolean);
+  if (tokens.length < 2) throw createHttpError(400, "A 2-leg order needs at least two legs");
+  const body = tokens.join("_");
+  const trail = String(trailingId || "").trim();
+  return trail ? `181$${body}$${trail}` : `181$${body}`;
+}
+
 function intentPayload(record) {
   const details = record?.details || {};
-  if (record?.kind !== "order-intent" || !/^[1-9]\d{0,12}$/.test(String(details.scripCode || ""))) {
+  if (record?.kind !== "order-intent") return record?.payload || "";
+  if (Array.isArray(details.legs) && details.legs.length >= 2) {
+    try {
+      return buildMultiLegDeepLink(details.legs, details.multiLegId || "");
+    } catch {
+      return record?.payload || "";
+    }
+  }
+  if (!/^[1-9]\d{0,12}$/.test(String(details.scripCode || ""))) {
     return record?.payload || "";
   }
   const exchange = String(details.exchange || "").trim().toUpperCase();
@@ -251,10 +300,70 @@ async function createIntent(req, res) {
   if (!/^[1-9]\d{0,12}$/.test(scripCode)) {
     throw createHttpError(400, "Sharekhan scrip code not found. Search and select an instrument, or sync the script master.");
   }
-  // Equity + F&O/commodity one-tap use the same 6-field shape; exchange id selects the segment master.
-  const payload = ["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)
-    ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
-    : "";
+
+  async function normalizeLeg(raw, label) {
+    const legSymbol = String(raw.tradingSymbol || "").trim().toUpperCase().slice(0, 60);
+    const legSide = String(raw.side || "").trim().toUpperCase();
+    const legExchange = String(raw.exchange || exchange).trim().toUpperCase();
+    const legSegment = String(raw.segment || segment).trim().toUpperCase();
+    const legQty = Number(raw.quantity);
+    const legPrice = Number(raw.price);
+    if (!legSymbol || !/^[A-Z0-9._-]+$/.test(legSymbol)) throw createHttpError(400, `${label}: valid trading symbol required`);
+    if (!["BUY", "SELL"].includes(legSide)) throw createHttpError(400, `${label}: choose Buy or Sell`);
+    if (!Number.isSafeInteger(legQty) || legQty < 1) throw createHttpError(400, `${label}: quantity must be a positive whole number`);
+    if (!Number.isFinite(legPrice) || legPrice < 0) throw createHttpError(400, `${label}: price must be zero or greater`);
+    if (!["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(legExchange)) throw createHttpError(400, `${label}: unsupported exchange`);
+    let legScrip = String(raw.scripCode || "").trim();
+    if (!/^[1-9]\d{0,12}$/.test(legScrip)) {
+      const instrument = await resolveInstrumentForOrder({
+        symbol: legSymbol,
+        exchange: legExchange,
+        segment: legSegment,
+        symbolToken: raw.scripCode,
+      });
+      legScrip = String(instrument?.token || "");
+    }
+    if (!/^[1-9]\d{0,12}$/.test(legScrip)) {
+      throw createHttpError(400, `${label}: Sharekhan scrip code not found for ${legSymbol}`);
+    }
+    return {
+      stock: String(raw.stock || stock || "").trim().slice(0, 120),
+      tradingSymbol: legSymbol,
+      side: legSide,
+      quantity: legQty,
+      price: legPrice,
+      exchange: legExchange,
+      segment: legSegment,
+      scripCode: legScrip,
+      expiry: String(raw.expiry || "").trim().slice(0, 40),
+      strike: String(raw.strike || "").trim().slice(0, 40),
+      optionType: String(raw.optionType || "").trim().toUpperCase().slice(0, 10),
+      buyRange: String(raw.buyRange || (legPrice > 0 ? legPrice : "")).trim().slice(0, 40),
+    };
+  }
+
+  let multiLegs = null;
+  const rawLegs = Array.isArray(source.legs) ? source.legs.filter(Boolean) : [];
+  const leg2 = source.leg2 && typeof source.leg2 === "object" ? source.leg2 : null;
+  if (rawLegs.length >= 2 || leg2) {
+    const sources = rawLegs.length >= 2
+      ? rawLegs.slice(0, 4)
+      : [
+          { tradingSymbol, exchange, segment, scripCode, side, price, quantity, stock, expiry: source.expiry, strike: source.strike, optionType: source.optionType, buyRange: source.buyRange || source.card?.buyRange },
+          leg2,
+        ];
+    multiLegs = [];
+    for (let index = 0; index < sources.length; index += 1) {
+      multiLegs.push(await normalizeLeg(sources[index], `Leg ${index + 1}`));
+    }
+  }
+
+  // Single-leg: 131$…  |  2+ legs: 181$NF-scrip-SIDE-price-qty_…
+  const payload = multiLegs
+    ? buildMultiLegDeepLink(multiLegs, source.multiLegId || "")
+    : (["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)
+      ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
+      : "");
   const target1 = String(
     source.card?.target1 || source.target1 || source.card?.target || source.target || ""
   ).trim().slice(0, 40);
@@ -287,7 +396,11 @@ async function createIntent(req, res) {
     bracketWebUrl: webTradeUrl({ exchange, tradingSymbol, scripCode, bracket: { enabled: false }, orderType }),
     card,
     notes: String(source.notes || "").trim().slice(0, 500),
+    strategyName: String(source.strategyName || "").trim().slice(0, 80),
+    approxMargin: String(source.approxMargin || "").trim().slice(0, 40),
+    multiLegId: String(source.multiLegId || "").trim().slice(0, 40),
   };
+  if (multiLegs) details.legs = multiLegs;
   const record = { code: crypto.randomBytes(12).toString("base64url"), kind: "order-intent", payload, details,
     active: true, clicks: 0, createdAt: new Date(), createdBy: req.user.sub };
   await collection().insertOne(record);
@@ -413,8 +526,10 @@ module.exports = {
   skOnetapRedirect,
   parsePayload,
   buildOrderDeepLink,
+  buildMultiLegDeepLink,
   webTradeUrl,
   mobileAppUrls,
   pickMobileAppUrl,
   ourOnetapUrl,
+  isValidDeepLinkPayload,
 };
