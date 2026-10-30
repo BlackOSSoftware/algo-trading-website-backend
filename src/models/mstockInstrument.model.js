@@ -65,8 +65,15 @@ async function replaceAllInstruments(entries) {
   for (let i = 0; i < docs.length; i += chunkSize) {
     const chunk = docs.slice(i, i + chunkSize);
     if (!chunk.length) continue;
-    const result = await collection.insertMany(chunk, { ordered: false });
-    inserted += result.insertedCount || chunk.length;
+    try {
+      const result = await collection.insertMany(chunk, { ordered: false });
+      inserted += result.insertedCount || 0;
+    } catch (err) {
+      const duplicate = err?.code === 11000 || err?.name === "MongoBulkWriteError";
+      const insertedCount = Number(err?.result?.insertedCount || 0);
+      if (!duplicate) throw err;
+      inserted += insertedCount;
+    }
   }
 
   return {
@@ -147,43 +154,84 @@ async function latestInstrumentSync(exchange) {
   return normalizeString(doc?.syncedAt);
 }
 
-async function searchInstruments(query, { limit = 20, exchange = "", instrumentType = "", segment = "", expiry = "" } = {}) {
-  const q = normalizeString(query).toUpperCase();
-  const expiryNorm = normalizeString(expiry);
-  if (!q && !expiryNorm) return [];
+function parseContractQuery(value) {
+  const raw = normalizeString(value).toUpperCase();
+  const spaced = /^([A-Z][A-Z0-9.&-]*)\s+(\d+(?:\.\d+)?)\s*(CE|PE)$/.exec(raw);
+  if (spaced) {
+    return { name: spaced[1], strike: String(Number(spaced[2])), right: spaced[3], expiryPrefix: "" };
+  }
+
+  const compact = raw.replace(/[\s/_-]+/g, "");
+  const match = /^([A-Z][A-Z0-9.&-]*?)(\d{1,2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)(\d+(?:\.\d+)?)(CE|PE)$/.exec(compact);
+  if (!match) return null;
+
+  let digits = match[4];
+  let year = "";
+  if (/^\d{6,}$/.test(digits)) {
+    const maybeYear = Number(digits.slice(0, 2));
+    if (maybeYear >= 20 && maybeYear <= 39) {
+      year = digits.slice(0, 2);
+      digits = digits.slice(2);
+    }
+  }
+
+  const day = match[2].padStart(2, "0");
+  const strike = Number(digits);
+  return {
+    name: match[1],
+    strike: Number.isFinite(strike) ? String(strike) : digits,
+    right: match[5],
+    expiryPrefix: `${day}${match[3]}${year ? `20${year}` : ""}`,
+  };
+}
+
+async function queryInstruments({
+  q = "",
+  parsed = null,
+  limit = 20,
+  exchange = "",
+  instrumentType = "",
+  segment = "",
+  expiry = "",
+} = {}) {
+  const expiryNorm = normalizeString(expiry).toUpperCase();
+  if (!q && !parsed && !expiryNorm) return [];
 
   const filter = { $and: [] };
-  if (q) filter.$and.push(
-      {
-        $or: [
-          { symbol: { $regex: `^${escapeRegex(q)}` } },
-          { name: { $regex: `^${escapeRegex(q)}` } },
-          { searchText: { $regex: escapeRegex(q) } },
-        ],
-      }
-  );
-
   const exchangeNorm = normalizeString(exchange).toUpperCase();
   if (exchangeNorm) filter.$and.push({ exchange: exchangeNorm });
-  if (expiryNorm) filter.$and.push({ expiry: expiryNorm });
+
+  if (parsed) {
+    filter.$and.push({
+      $or: [
+        { name: parsed.name },
+        { symbol: { $regex: `^${escapeRegex(parsed.name)}` } },
+      ],
+    });
+    if (parsed.strike) filter.$and.push({ strike: parsed.strike });
+    if (parsed.right) filter.$and.push({ symbol: { $regex: `${escapeRegex(parsed.right)}$` } });
+    if (parsed.expiryPrefix) filter.$and.push({ expiry: { $regex: `^${escapeRegex(parsed.expiryPrefix)}` } });
+  } else if (q) {
+    filter.$and.push({
+      $or: [
+        { symbol: { $regex: `^${escapeRegex(q)}` } },
+        { name: { $regex: `^${escapeRegex(q)}` } },
+        { searchText: { $regex: escapeRegex(q) } },
+      ],
+    });
+  }
+  if (expiryNorm && !(parsed && parsed.expiryPrefix)) filter.$and.push({ expiry: expiryNorm });
 
   const segmentNorm = normalizeString(segment).toUpperCase();
   const typeNorm = normalizeString(instrumentType).toUpperCase();
-  // Equity lives on cash exchanges only. Never return NSE/BSE cash names for MCX/CDS.
   if (segmentNorm === "EQ" || typeNorm === "EQ") {
-    if (exchangeNorm && !["NSE", "BSE"].includes(exchangeNorm)) {
-      return [];
-    }
+    if (exchangeNorm && !["NSE", "BSE"].includes(exchangeNorm)) return [];
     filter.$and.push({ instrumentType: { $in: ["EQ", "EQUITY"] } });
   } else if (segmentNorm === "OPT" || typeNorm === "OPT") {
-    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) {
-      return [];
-    }
+    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) return [];
     filter.$and.push({ instrumentType: { $regex: /OPT|OPTSTK|OPTIDX|OPTCUR|OI|OS/i } });
   } else if (segmentNorm === "FUT" || typeNorm === "FUT") {
-    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) {
-      return [];
-    }
+    if (exchangeNorm && ["NSE", "BSE"].includes(exchangeNorm)) return [];
     filter.$and.push({ instrumentType: { $regex: /FUT|FUTSTK|FUTIDX|FUTCOM|FUTCUR|FS|FI/i } });
   } else if (exchangeNorm === "MCX" || exchangeNorm === "CDS") {
     filter.$and.push({ instrumentType: { $not: /^(EQ|EQUITY)$/i } });
@@ -204,18 +252,20 @@ async function searchInstruments(query, { limit = 20, exchange = "", instrumentT
       strike: 1,
       lotSize: 1,
     })
+    .sort({ symbol: 1 })
     .limit(Math.min(max * 8, 120))
     .toArray();
 
   const score = (doc) => {
     const symbol = String(doc.symbol || "").toUpperCase();
     const name = String(doc.name || "").toUpperCase();
-    const searchText = String(doc.searchText || "").toUpperCase();
-    if (q && symbol === q) return 0;
-    if (q && symbol.startsWith(q)) return 1;
-    if (q && (name.startsWith(q) || name.startsWith(`${q}-`))) return 2;
-    if (q && searchText.includes(` ${q}`)) return 3;
-    return 3;
+    const target = parsed?.name || q;
+    if (target && symbol === target) return 0;
+    if (target && name === target) return 1;
+    if (target && symbol.startsWith(target)) return 2;
+    if (target && name.startsWith(target)) return 3;
+    if (parsed?.strike && String(doc.strike) === parsed.strike) return 4;
+    return 5;
   };
 
   rows.sort((a, b) => {
@@ -227,6 +277,31 @@ async function searchInstruments(query, { limit = 20, exchange = "", instrumentT
   });
 
   return rows.slice(0, max);
+}
+
+async function searchInstruments(query, options = {}) {
+  const q = normalizeString(query).toUpperCase();
+  const expiryNorm = normalizeString(options.expiry).toUpperCase();
+  if (!q && !expiryNorm) return [];
+
+  const parsed = parseContractQuery(q);
+  const segment = normalizeString(options.segment).toUpperCase();
+  let rows = await queryInstruments({ ...options, q, parsed, expiry: expiryNorm });
+  if (!rows.length && expiryNorm) {
+    rows = await queryInstruments({ ...options, q, parsed, expiry: "" });
+  }
+  if (!rows.length && parsed?.expiryPrefix) {
+    rows = await queryInstruments({
+      ...options,
+      q,
+      parsed: { ...parsed, expiryPrefix: "" },
+      expiry: "",
+    });
+  }
+  if (!rows.length && (segment === "OPT" || segment === "FUT") && normalizeString(options.exchange).toUpperCase() !== "NFO") {
+    rows = await queryInstruments({ ...options, q, parsed, exchange: "NFO", expiry: "" });
+  }
+  return rows;
 }
 
 async function listInstrumentExpiries({ query = "", exchange = "", segment = "" } = {}) {

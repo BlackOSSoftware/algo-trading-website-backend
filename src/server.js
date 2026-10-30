@@ -16,7 +16,7 @@ const {
 } = require("./services/telegramPolling.service");
 
 const { startSharekhanMarketData, closeSharekhanStreams } = require("./services/sharekhanMarketData.service");
-const { ensureSharekhanMcxInstruments } = require("./services/sharekhan.service");
+const { ensureAngelInstruments } = require("./services/angelone.service");
 
 const PORT = process.env.PORT || 4000;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
@@ -96,18 +96,18 @@ async function startServer() {
 
   server.listen(PORT, () => {
     console.log(`Backend listening on http://localhost:${PORT}`);
-    ensureSharekhanMcxInstruments()
+    ensureAngelInstruments()
       .then((result) => {
         if (result?.ok) {
           console.log(
-            `Sharekhan MCX contracts ${result.skipped ? "already loaded" : "synced"} (${result.totalStored || result.count || 0})`
+            `Angel One instruments ${result.skipped ? "already loaded" : "synced"} (${result.totalStored || result.count || 0})`
           );
         } else if (result?.error) {
-          console.error("Sharekhan MCX contract sync failed:", result.error);
+          console.error("Angel One instrument sync failed:", result.error);
         }
       })
       .catch((err) => {
-        console.error("Sharekhan MCX contract sync failed:", err instanceof Error ? err.message : err);
+        console.error("Angel One instrument sync failed:", err instanceof Error ? err.message : err);
       });
   });
 

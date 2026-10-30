@@ -13,7 +13,7 @@ const {
   listInstrumentExpiries,
   getMStockInstrumentCount,
 } = require("../services/mstock.service");
-const { ensureSharekhanMcxInstruments } = require("../services/sharekhan.service");
+const { ensureAngelInstruments } = require("../services/angelone.service");
 
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE", "NFO", "BFO", "CDS", "MCX"]);
 
@@ -489,12 +489,10 @@ async function searchInstrumentsAdmin(req, res) {
   const limitRaw = params ? params.get("limit") : null;
   const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
 
-  if (normalizeString(exchange).toUpperCase() === "MCX") {
-    try {
-      await ensureSharekhanMcxInstruments();
-    } catch {
-      // Search still uses whatever contracts are already stored.
-    }
+  try {
+    await ensureAngelInstruments();
+  } catch {
+    // Search still uses whatever contracts are already stored.
   }
 
   const instruments = await searchMStockInstruments(q, {
@@ -520,12 +518,10 @@ async function searchInstruments(req, res) {
   const limitRaw = params ? params.get("limit") : null;
   const limit = limitRaw ? Math.min(Number(limitRaw) || 20, 50) : 20;
 
-  if (normalizeString(exchange).toUpperCase() === "MCX") {
-    try {
-      await ensureSharekhanMcxInstruments();
-    } catch {
-      // Search still uses whatever contracts are already stored.
-    }
+  try {
+    await ensureAngelInstruments();
+  } catch {
+    // Search still uses whatever contracts are already stored.
   }
 
   const instruments = await searchMStockInstruments(q, {
@@ -557,9 +553,7 @@ async function searchSharekhanInstruments(req, res) {
     sendJson(res, 200, { ok: true, instruments: [], hint: "Futures/Options search needs NFO, BFO, MCX, or CDS." });
     return;
   }
-  if (exchange === "MCX") {
-    try { await ensureSharekhanMcxInstruments(); } catch { /* serve the local master if refresh fails */ }
-  }
+  try { await ensureAngelInstruments(); } catch { /* serve the local master if refresh fails */ }
   const instruments = await searchMStockInstruments(q, {
     limit,
     exchange,
@@ -575,7 +569,7 @@ async function listSharekhanExpiries(req, res) {
   const query = params?.get("q") || "";
   const exchange = params?.get("exchange") || "";
   const segment = params?.get("segment") || "";
-  if (exchange === "MCX") { try { await ensureSharekhanMcxInstruments(); } catch { /* use cached master */ } }
+  try { await ensureAngelInstruments(); } catch { /* use the contracts already stored */ }
   const expiries = await listInstrumentExpiries({ query, exchange, segment });
   sendJson(res, 200, { ok: true, expiries });
 }

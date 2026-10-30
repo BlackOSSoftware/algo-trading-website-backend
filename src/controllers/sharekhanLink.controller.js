@@ -110,8 +110,13 @@ async function skOnetapRedirect(req, res) {
 // Equity: NSE=11, BSE=12. F&O ids from Sharekhan app mobile_config (ez_options):
 // NFO=12, BFO=22, MCX=32. CDS best-effort=13.
 // BUY=1, SELL=2, empty price = market.
-// Bracket/BigTrade+ SL+target are NOT in the public one-tap schema — entry fields only.
-// Extra trailing fields have broken parsing before, so we keep the proven 6-field payload.
+//
+// Bracket / research one-tap, decoded from https://gi9.in/EkwsVc
+// (INFY 23-Nov-2026 CE idea → onetap deepLinking):
+// 131$12$104808$1$0$1$0$0$0$0$0$2826052
+// Same 12-token shape. Book profit and stop loss fill the two price slots that
+// Sharekhan's sample leaves at 0. The trailing 2826052 is the research one-tap
+// suffix seen on that link and on 181$ multi-leg research links.
 function exchangeCodeForDeepLink(exchange) {
   const exchangeNorm = String(exchange || "").trim().toUpperCase();
   if (exchangeNorm === "BSE") return "12";
@@ -122,15 +127,43 @@ function exchangeCodeForDeepLink(exchange) {
   return "11"; // NSE cash
 }
 
-function buildOrderDeepLink({ exchange, scripCode, side, price, quantity }) {
+// Suffix on Sharekhan research one-tap links (gi9.in/EkwsVc and 181$ multi-leg samples).
+const SHAREKHAN_ONETAP_SUFFIX = "2826052";
+
+function moneyToken(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "0";
+  return String(numeric);
+}
+
+function buildOrderDeepLink({ exchange, scripCode, side, price, quantity, bracket }) {
   const sideNorm = String(side || "").trim().toUpperCase();
   const exchangeCode = exchangeCodeForDeepLink(exchange);
   const sideCode = sideNorm === "SELL" ? "2" : "1";
   const qtyNum = Number(quantity);
   const qtyCode = Number.isFinite(qtyNum) && qtyNum > 0 ? String(Math.trunc(qtyNum)) : "1";
-  const numericPrice = Number(price);
-  const priceCode = Number.isFinite(numericPrice) && numericPrice > 0 ? String(numericPrice) : "";
-  return ["131", exchangeCode, String(scripCode).trim(), qtyCode, priceCode, sideCode].join("$");
+  const scrip = String(scripCode).trim();
+  const enabled = Boolean(bracket && (bracket.enabled || Number(bracket.targetPrice) > 0 || Number(bracket.stopLossPrice) > 0));
+  if (!enabled) {
+    const numericPrice = Number(price);
+    const priceCode = Number.isFinite(numericPrice) && numericPrice > 0 ? String(numericPrice) : "";
+    return ["131", exchangeCode, scrip, qtyCode, priceCode, sideCode].join("$");
+  }
+  // 131$exchange$scrip$qty$price$side$0$0$bookProfit$stopLoss$0$2826052
+  return [
+    "131",
+    exchangeCode,
+    scrip,
+    qtyCode,
+    moneyToken(price),
+    sideCode,
+    "0",
+    "0",
+    moneyToken(bracket.targetPrice),
+    moneyToken(bracket.stopLossPrice),
+    "0",
+    SHAREKHAN_ONETAP_SUFFIX,
+  ].join("$");
 }
 
 // Multi-leg one-tap (verified from Sharekhan gi9 / onetap deepLinking):
@@ -180,12 +213,23 @@ function intentPayload(record) {
   if (!["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) {
     return record?.payload || "";
   }
+  const storedBracket = details.bracket && typeof details.bracket === "object" ? details.bracket : {};
+  const card = details.card && typeof details.card === "object" ? details.card : {};
+  const isBracket =
+    String(details.orderType || "").toUpperCase() === "BRACKET" ||
+    String(details.productType || "").toUpperCase() === "BIGTRADEPLUS" ||
+    Boolean(storedBracket.enabled);
+  const targetPrice = storedBracket.targetPrice || card.target1 || String(card.target || "").split("/")[0];
+  const stopLossPrice = storedBracket.stopLossPrice || card.stopLoss;
   return buildOrderDeepLink({
     exchange,
     scripCode: details.scripCode,
     side: details.side,
     price: details.price,
     quantity: details.quantity,
+    bracket: isBracket
+      ? { enabled: true, targetPrice, stopLossPrice }
+      : null,
   });
 }
 
@@ -241,17 +285,14 @@ async function createIntent(req, res) {
   const quantity = Number(source.quantity);
   const price = Number(source.price);
   const rawBracket = source.bracket && typeof source.bracket === "object" ? source.bracket : {};
-  // Bracket / BigTrade+ one-tap + web brackettsl path removed — not reliable in Sharekhan.
-  if (
+  const wantsBracket =
     orderType === "BRACKET" ||
     productType === "BIGTRADEPLUS" ||
     Boolean(rawBracket.enabled) ||
-    String(source.openMode || "").toLowerCase() === "brackettsl"
-  ) {
-    throw createHttpError(
-      400,
-      "Bracket / BigTrade+ order links are removed. Use Market/Limit with Delivery or Intraday (BigTrade)."
-    );
+    String(source.openMode || "").toLowerCase() === "brackettsl";
+  if (wantsBracket) {
+    orderType = "BRACKET";
+    if (!["INVESTMENT", "BIGTRADE", "BIGTRADEPLUS"].includes(productType)) productType = "BIGTRADEPLUS";
   }
   if (!tradingSymbol || !/^[A-Z0-9._-]+$/.test(tradingSymbol)) throw createHttpError(400, "Valid trading symbol is required");
   if (!["BUY", "SELL"].includes(side)) throw createHttpError(400, "Choose Buy or Sell");
@@ -260,10 +301,13 @@ async function createIntent(req, res) {
   if (!["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)) throw createHttpError(400, "Choose a supported exchange");
   if (!["EQ", "FUT", "OPT"].includes(segment)) throw createHttpError(400, "Choose Equity, Futures, or Options");
   if (segment !== "EQ" && !["NFO", "BFO", "MCX", "CDS"].includes(exchange)) throw createHttpError(400, "Choose a derivatives exchange for Futures or Options");
-  if (!["NORMAL", "LIMIT", "STOPLOSS", "STOPLOSS_MARKET"].includes(orderType)) throw createHttpError(400, "Choose a supported Sharekhan order type");
-  if (!["INVESTMENT", "BIGTRADE"].includes(productType)) throw createHttpError(400, "Choose Delivery (Investment) or Intraday (BigTrade)");
+  if (!["NORMAL", "LIMIT", "STOPLOSS", "STOPLOSS_MARKET", "BRACKET"].includes(orderType)) throw createHttpError(400, "Choose a supported Sharekhan order type");
+  if (!["INVESTMENT", "BIGTRADE", "BIGTRADEPLUS"].includes(productType)) throw createHttpError(400, "Choose Delivery, Intraday (BigTrade), or BigTrade+");
+  if (productType === "BIGTRADEPLUS" && orderType !== "BRACKET") {
+    throw createHttpError(400, "BigTrade+ is only used with a bracket order (book profit + stop loss).");
+  }
   if (!["GFD", "IOC"].includes(validity)) throw createHttpError(400, "Choose Day or IOC validity");
-  if (orderType !== "NORMAL" && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
+  if (orderType !== "NORMAL" && orderType !== "BRACKET" && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
   if (orderType.startsWith("STOPLOSS") && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) throw createHttpError(400, "A positive trigger price is required for stop-loss orders");
   if (segment === "EQ" && !["NSE", "BSE"].includes(exchange)) {
     throw createHttpError(400, "Equity orders support NSE and BSE only. Switch segment to Futures/Options for MCX or CDS.");
@@ -345,6 +389,9 @@ async function createIntent(req, res) {
   let multiLegs = null;
   const rawLegs = Array.isArray(source.legs) ? source.legs.filter(Boolean) : [];
   const leg2 = source.leg2 && typeof source.leg2 === "object" ? source.leg2 : null;
+  if (orderType === "BRACKET" && (rawLegs.length >= 2 || leg2)) {
+    throw createHttpError(400, "Bracket orders are single-leg. Turn off the second leg, or use a normal 2-leg link.");
+  }
   if (rawLegs.length >= 2 || leg2) {
     const sources = rawLegs.length >= 2
       ? rawLegs.slice(0, 4)
@@ -358,25 +405,44 @@ async function createIntent(req, res) {
     }
   }
 
-  // Single-leg: 131$…  |  2+ legs: 181$NF-scrip-SIDE-price-qty_…
-  const payload = multiLegs
-    ? buildMultiLegDeepLink(multiLegs, source.multiLegId || "")
-    : (["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)
-      ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity })
-      : "");
   const target1 = String(
-    source.card?.target1 || source.target1 || source.card?.target || source.target || ""
+    source.card?.target1 || source.target1 || rawBracket.targetPrice || source.card?.target || source.target || ""
   ).trim().slice(0, 40);
   const target2 = String(source.card?.target2 || source.target2 || "").trim().slice(0, 40);
   const target3 = String(source.card?.target3 || source.target3 || "").trim().slice(0, 40);
+  const stopLossText = String(
+    source.card?.stopLoss || source.stopLoss || rawBracket.stopLossPrice || ""
+  ).trim().slice(0, 40);
+  const bookProfit = Number(String(target1).split("/")[0]);
+  const stopLoss = Number(String(stopLossText).split("/")[0]);
+  if (orderType === "BRACKET") {
+    if (!Number.isFinite(bookProfit) || bookProfit <= 0) throw createHttpError(400, "Bracket order needs a book-profit (target) price.");
+    if (!Number.isFinite(stopLoss) || stopLoss <= 0) throw createHttpError(400, "Bracket order needs a stop-loss price.");
+    if (bookProfit === stopLoss) throw createHttpError(400, "Book profit and stop loss cannot be the same price.");
+    if (price > 0 && side === "BUY" && !(bookProfit > price && stopLoss < price)) {
+      throw createHttpError(400, "Buy bracket: target must be above the entry, and stop loss below it.");
+    }
+    if (price > 0 && side === "SELL" && !(stopLoss > price && bookProfit < price)) {
+      throw createHttpError(400, "Sell bracket: stop loss must be above the entry, and target below it.");
+    }
+  }
+  const bracket = orderType === "BRACKET"
+    ? { enabled: true, mode: productType, targetPrice: bookProfit, stopLossPrice: stopLoss, trailingStop: 0 }
+    : { enabled: false };
+  // Single-leg: 131$…  |  Bracket: 12-token research one-tap  |  2+ legs: 181$…
+  const payload = multiLegs
+    ? buildMultiLegDeepLink(multiLegs, source.multiLegId || "")
+    : (["NSE", "BSE", "NFO", "BFO", "MCX", "CDS"].includes(exchange)
+      ? buildOrderDeepLink({ exchange, scripCode, side, price, quantity, bracket })
+      : "");
   const card = {
-    buyRange: String(source.card?.buyRange || source.buyRange || price || "").trim().slice(0, 40),
+    buyRange: String(source.card?.buyRange || source.buyRange || (price > 0 ? price : "")).trim().slice(0, 40),
     target1,
     target2,
     target3,
     target: [target1, target2, target3].filter(Boolean).join(" / ").slice(0, 80),
-    stopLoss: String(source.card?.stopLoss || source.stopLoss || "").trim().slice(0, 40),
-    timeFrame: String(source.card?.timeFrame || source.timeFrame || (productType === "BIGTRADE" ? "INTRADAY" : "")).trim().slice(0, 40),
+    stopLoss: stopLossText,
+    timeFrame: String(source.card?.timeFrame || source.timeFrame || (productType === "BIGTRADE" || productType === "BIGTRADEPLUS" ? "INTRADAY" : "")).trim().slice(0, 40),
     headline: String(source.card?.headline || source.headline || "").trim().slice(0, 60),
   };
   const details = {
@@ -392,8 +458,9 @@ async function createIntent(req, res) {
     productType,
     validity,
     triggerPrice,
-    openMode: "normal",
-    bracketWebUrl: webTradeUrl({ exchange, tradingSymbol, scripCode, bracket: { enabled: false }, orderType }),
+    bracket,
+    openMode: bracket.enabled ? "brackettsl" : "normal",
+    bracketWebUrl: webTradeUrl({ exchange, tradingSymbol, scripCode, bracket, orderType }),
     card,
     notes: String(source.notes || "").trim().slice(0, 500),
     strategyName: String(source.strategyName || "").trim().slice(0, 80),
