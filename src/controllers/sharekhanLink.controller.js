@@ -5,6 +5,7 @@ const { resolveInstrumentForOrder } = require("../models/mstockInstrument.model"
 const { parseBody } = require("../utils/body");
 const { sendJson } = require("../utils/response");
 const { createHttpError } = require("../utils/httpError");
+const { getSharekhanLivePrice } = require("../services/sharekhan.service");
 
 const collection = () => getDb().collection("sharekhan_links");
 const SHAREKHAN_TRADING_HOME = "https://newtrade.sharekhan.com/";
@@ -306,7 +307,7 @@ async function createIntent(req, res) {
   if (productType === "BIGTRADEPLUS" && orderType !== "BRACKET") {
     throw createHttpError(400, "BigTrade+ is only used with a bracket order (book profit + stop loss).");
   }
-  if (!["GFD", "IOC"].includes(validity)) throw createHttpError(400, "Choose Day or IOC validity");
+  if (!["5M", "15M", "30M", "1H", "2H", "1D", "2D", "GFD", "IOC"].includes(validity)) throw createHttpError(400, "Choose a supported link validity");
   if (orderType !== "NORMAL" && orderType !== "BRACKET" && (!Number.isFinite(price) || price <= 0)) throw createHttpError(400, "A positive limit price is required for this order type");
   if (orderType.startsWith("STOPLOSS") && (!Number.isFinite(triggerPrice) || triggerPrice <= 0)) throw createHttpError(400, "A positive trigger price is required for stop-loss orders");
   if (segment === "EQ" && !["NSE", "BSE"].includes(exchange)) {
@@ -468,14 +469,16 @@ async function createIntent(req, res) {
     multiLegId: String(source.multiLegId || "").trim().slice(0, 40),
   };
   if (multiLegs) details.legs = multiLegs;
+  const validityMs = ({ "5M": 300000, "15M": 900000, "30M": 1800000, "1H": 3600000, "2H": 7200000, "1D": 86400000, "2D": 172800000 })[validity];
   const record = { code: crypto.randomBytes(12).toString("base64url"), kind: "order-intent", payload, details,
-    active: true, clicks: 0, createdAt: new Date(), createdBy: req.user.sub };
+    active: true, expiresAt: validityMs ? new Date(Date.now() + validityMs) : null, clicks: 0, createdAt: new Date(), createdBy: req.user.sub };
   await collection().insertOne(record);
   sendJson(res, 201, { ok: true, link: publicRecord(record, req) });
 }
 
 async function getIntent(req, res) {
   const record = await collection().findOne({ code: req.params.code, kind: "order-intent", active: true });
+  if (record?.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) throw createHttpError(404, "Order link expired");
   if (!record) throw createHttpError(404, "Order link not found or inactive");
   await collection().updateOne({ _id: record._id }, { $inc: { clicks: 1 } });
   res.setHeader("Cache-Control", "no-store");
@@ -492,6 +495,16 @@ async function getIntent(req, res) {
     iosAppUrl: apps.ios,
     schemeUrl: apps.scheme,
   });
+}
+
+async function getIntentPrice(req, res) {
+  const record = await collection().findOne({ code: req.params.code, kind: "order-intent", active: true });
+  if (record?.expiresAt && new Date(record.expiresAt).getTime() <= Date.now()) throw createHttpError(404, "Order link expired");
+  if (!record) throw createHttpError(404, "Order link not found or inactive");
+  const details = record.details || {};
+  const quote = await getSharekhanLivePrice({ exchange: details.exchange, scripCode: details.scripCode });
+  sendJson(res, 200, { ok: Boolean(quote.ok), price: quote.ok ? quote.price : null,
+    timestamp: quote.result?.timestamp || null, error: quote.ok ? "" : quote.error || "Live rate unavailable" });
 }
 
 async function create(req, res) {
@@ -585,6 +598,7 @@ module.exports = {
   create,
   createIntent,
   getIntent,
+  getIntentPrice,
   list,
   deactivate,
   remove,

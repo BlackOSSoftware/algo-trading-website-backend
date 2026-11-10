@@ -105,6 +105,7 @@ function registerV1Routes(router) {
   router.get("/l/:code", sharekhanLinks.redirect);
   router.get("/sk-onetap", sharekhanLinks.skOnetapRedirect);
   router.get("/api/v1/order-intents/:code", sharekhanLinks.getIntent);
+  router.get("/api/v1/order-intents/:code/price", sharekhanLinks.getIntentPrice);
   router.get("/api/v1/order-intents/:code/qr.png", sharekhanLinks.getLinkQr);
   router.post("/api/v1/sharekhan/order-intents", requireSharekhan(sharekhanLinks.createIntent));
   router.get("/api/v1/sharekhan/links", requireSharekhan(sharekhanLinks.list));
